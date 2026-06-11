@@ -89,6 +89,12 @@ TELEGRAM_ADMIN_CHAT = os.environ.get("TELEGRAM_ADMIN_CHAT_ID", "")
 ANTHROPIC_KEY  = os.environ.get("ANTHROPIC_API_KEY", "여기에_앤트로픽키")
 CLAUDE_MODEL   = "claude-sonnet-4-6"  # 최신 모델명은 docs.claude.com 에서 확인
 
+# Google Gemini — 무료 키: https://aistudio.google.com (Anthropic 대체용, 크레딧 불필요)
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+# 무료 티어에서 호출되는 모델로 지정. 구형(gemini-2.0-*)은 무료 쿼터가 0(limit:0)이라 동작 안 함.
+# 호출 실패(쿼터/과부하) 시 analyze()가 기본 보고서로 폴백. 모델 교체는 GEMINI_MODEL 환경변수로.
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+
 LOG_FILE = os.environ.get("LOG_FILE", os.path.expanduser("~/.stock_alert_302440.log"))
 
 
@@ -222,7 +228,7 @@ def get_news(query, count=8):
 
 
 # ─────────────────────────────────────────────────────────────
-# 4) Claude — 원인 분석 보고서 생성
+# 4) LLM(Claude / Gemini) — 원인 분석 보고서 생성
 # ─────────────────────────────────────────────────────────────
 def _news_lines_html(news):
     """뉴스 항목(dict 리스트)을 텔레그램 HTML 하이퍼링크 줄로 변환. 제목 클릭 시 기사로 이동."""
@@ -251,7 +257,7 @@ def _basic_report(change_rate, price, kospi_rate, disclosures, news, direction):
     disc = [html.escape(d) for d in disclosures] if disclosures else ["- 당일 신규 공시 없음"]
     lines = [
         f"📊 {STOCK_NAME} 주가 {direction} ({change_rate:+.2f}%)",
-        "⚠️ AI 분석 미수행(ANTHROPIC_API_KEY 미설정) — 수집된 원자료만 전달합니다.",
+        "⚠️ AI 분석 미수행(LLM API 키 미설정 또는 호출 실패) — 수집된 원자료만 전달합니다.",
         "",
         f"■ 현재가: {price:,}원 / 전일대비 {change_rate:+.2f}%",
         f"■ 코스피 등락률: {kospi_rate if kospi_rate is not None else '조회불가'}%",
@@ -265,13 +271,14 @@ def _basic_report(change_rate, price, kospi_rate, disclosures, news, direction):
     return "\n".join(lines)
 
 
-def analyze(change_rate, price, kospi_rate, disclosures, news):
-    """원인 분석 보고서(텔레그램 HTML 형식 문자열) 반환."""
-    direction = "상승" if change_rate > 0 else "하락"
-    # Anthropic 키가 없거나 플레이스홀더면 AI 분석을 건너뛰고 기본 보고서로 폴백
-    if not ANTHROPIC_KEY or ANTHROPIC_KEY.startswith("여기에"):
-        return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
-    prompt = f"""당신은 상장 바이오·제약 기업의 IR 애널리스트입니다.
+def _key_set(key):
+    """환경변수 키가 실제 설정됐는지(빈 값/한글 플레이스홀더 아님) 판정."""
+    return bool(key) and not key.startswith("여기에")
+
+
+def _analysis_prompt(change_rate, price, kospi_rate, disclosures, news, direction):
+    """바이오·제약 섹터 맥락의 원인 분석 프롬프트(제공처 공통)."""
+    return f"""당신은 상장 바이오·제약 기업의 IR 애널리스트입니다.
 아래 데이터를 근거로 {STOCK_NAME}({STOCK_CODE})의 주가 {direction} 원인을 분석하세요.
 
 [주가 현황]
@@ -295,19 +302,53 @@ def analyze(change_rate, price, kospi_rate, disclosures, news):
 ■ 근거:
 ■ 신뢰도: (상/중/하 + 한 줄 사유)
 """
+
+
+def _call_claude(prompt):
+    r = requests.post(
+        "https://api.anthropic.com/v1/messages",
+        headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
+                 "content-type": "application/json"},
+        json={"model": CLAUDE_MODEL, "max_tokens": 1024,
+              "messages": [{"role": "user", "content": prompt}]},
+        timeout=60,
+    )
+    r.raise_for_status()
+    return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
+
+
+def _call_gemini(prompt):
+    r = requests.post(
+        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        headers={"content-type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
+        json={"contents": [{"parts": [{"text": prompt}]}]},
+        timeout=60,
+    )
+    r.raise_for_status()
+    parts = r.json()["candidates"][0]["content"]["parts"]
+    return "".join(p.get("text", "") for p in parts)
+
+
+def analyze(change_rate, price, kospi_rate, disclosures, news):
+    """원인 분석 보고서(텔레그램 HTML 형식 문자열) 반환.
+
+    제공처 우선순위: Anthropic(Claude) → Google(Gemini) → 기본 보고서.
+    어느 LLM도 키가 없거나 호출이 실패하면 _basic_report()로 안전하게 폴백한다.
+    """
+    direction = "상승" if change_rate > 0 else "하락"
+
+    if _key_set(ANTHROPIC_KEY):
+        name, call = "Claude", _call_claude
+    elif _key_set(GEMINI_API_KEY):
+        name, call = "Gemini", _call_gemini
+    else:
+        return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
+
+    prompt = _analysis_prompt(change_rate, price, kospi_rate, disclosures, news, direction)
     try:
-        r = requests.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
-                     "content-type": "application/json"},
-            json={"model": CLAUDE_MODEL, "max_tokens": 1024,
-                  "messages": [{"role": "user", "content": prompt}]},
-            timeout=60,
-        )
-        r.raise_for_status()
-        ai_text = "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
+        ai_text = call(prompt)
     except Exception:
-        logging.warning("AI 분석 실패 — 기본 보고서로 폴백", exc_info=True)
+        logging.warning("%s 분석 실패 — 기본 보고서로 폴백", name, exc_info=True)
         return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
     # AI 본문은 html.escape로 안전화(HTML 파싱 깨짐 방지) 후, 뉴스 원문 링크를 하이퍼링크로 첨부.
     footer = "\n".join(["", "📰 관련 뉴스:", *_news_lines_html(news)]) if news else ""
