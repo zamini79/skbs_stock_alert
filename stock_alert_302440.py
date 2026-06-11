@@ -30,9 +30,37 @@ import json
 import datetime
 import requests
 
+
+# ─────────────────────────────────────────────────────────────
+# .env 자동 로딩 (의존성 없이 표준 라이브러리만 사용)
+#   - 스크립트와 같은 폴더의 .env 를 읽어 환경변수로 채운다.
+#   - 이미 셸(~/.zshrc 등)에 설정된 값이 있으면 그쪽을 우선한다(덮어쓰지 않음).
+#   - .env 가 없으면 조용히 넘어간다.
+# ─────────────────────────────────────────────────────────────
+def load_dotenv():
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, _, val = line.partition("=")
+            key = key.strip()
+            # 주석(#) 분리 후 양끝 따옴표 제거
+            val = val.split("#", 1)[0].strip().strip('"').strip("'")
+            if key and key not in os.environ:
+                os.environ[key] = val
+
+
+load_dotenv()
+
+
 # ─────────────────────────────────────────────────────────────
 # 설정 — 환경변수로 두는 걸 권장 (키를 코드에 직접 박지 마세요)
 # zsh 예: export KIS_APP_KEY="..."  를 ~/.zshrc 에 추가
+#   또는 .env 파일에 KEY=VALUE 형식으로 적어두면 자동 로딩됨(.env.example 참고)
 # ─────────────────────────────────────────────────────────────
 STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
@@ -144,8 +172,29 @@ def get_news(query, count=8):
 # ─────────────────────────────────────────────────────────────
 # 4) Claude — 원인 분석 보고서 생성
 # ─────────────────────────────────────────────────────────────
+def _basic_report(change_rate, price, kospi_rate, disclosures, news, direction):
+    """ANTHROPIC_API_KEY 미설정 시 — AI 분석 없이 수집 원자료만 정리한 기본 보고서."""
+    lines = [
+        f"📊 {STOCK_NAME} 주가 {direction} ({change_rate:+.2f}%)",
+        "⚠️ AI 분석 미수행(ANTHROPIC_API_KEY 미설정) — 수집된 원자료만 전달합니다.",
+        "",
+        f"■ 현재가: {price:,}원 / 전일대비 {change_rate:+.2f}%",
+        f"■ 코스피 등락률: {kospi_rate if kospi_rate is not None else '조회불가'}%",
+        "",
+        "■ 당일 공시:",
+        *(disclosures if disclosures else ["- 당일 신규 공시 없음"]),
+        "",
+        "■ 당일 뉴스 헤드라인:",
+        *(news if news else ["- 수집된 기사 없음"]),
+    ]
+    return "\n".join(lines)
+
+
 def analyze(change_rate, price, kospi_rate, disclosures, news):
     direction = "상승" if change_rate > 0 else "하락"
+    # Anthropic 키가 없거나 플레이스홀더면 AI 분석을 건너뛰고 기본 보고서로 폴백
+    if not ANTHROPIC_KEY or ANTHROPIC_KEY.startswith("여기에"):
+        return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
     prompt = f"""당신은 상장 바이오·제약 기업의 IR 애널리스트입니다.
 아래 데이터를 근거로 {STOCK_NAME}({STOCK_CODE})의 주가 {direction} 원인을 분석하세요.
 
