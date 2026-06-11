@@ -67,7 +67,7 @@ load_dotenv()
 # ─────────────────────────────────────────────────────────────
 STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
-THRESHOLD    = 5.0               # ±5%
+THRESHOLD    = 2.0               # ±2% (※ 동작 점검용 임시값 — 점검 후 5.0으로 원복)
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
 
 # 뉴스 수집 — 검색어 다양화(종목명 + 바이오 이슈), 시각 필터, 최종 건수
