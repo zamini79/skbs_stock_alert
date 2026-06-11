@@ -1,0 +1,54 @@
+name: 주가 변동 감지 (SK바이오사이언스 302440)
+
+# 평일 장중(KST 09:00~15:55) 5분 간격 실행 + 수동 실행 지원.
+# GitHub Actions cron 은 UTC 기준이므로 KST(=UTC+9)에서 9시간을 뺀 0~6시(UTC)로 지정.
+on:
+  schedule:
+    - cron: "*/5 0-6 * * 1-5"   # UTC 00:00~06:55 = KST 09:00~15:55, 월~금
+  workflow_dispatch:             # Actions 탭에서 수동 실행(테스트용)
+
+# 동시 실행 방지: 이전 실행이 끝나기 전 새 실행이 겹치지 않도록.
+concurrency:
+  group: stock-alert
+  cancel-in-progress: false
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 의존성 설치
+        run: pip install -r requirements.txt
+
+      # 하루 1회 보고 쿨다운 상태 파일을 'KST 날짜'별 캐시 키로 보존.
+      # - 그날 첫 실행: 캐시 미스 → 스크립트 실행 → (조건 충족 시) 보고 → 상태 파일 생성
+      #                 → 잡 종료 시 오늘 날짜 키로 캐시 저장.
+      # - 같은 날 이후 실행: 캐시 히트 → 상태 파일 복원 → 스크립트가 '이미 보고함' 판정 → 스킵.
+      - name: 오늘 날짜(KST) 산출
+        id: date
+        run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
+
+      - name: 보고 상태 파일 캐시
+        uses: actions/cache@v4
+        with:
+          path: ~/.stock_alert_302440_state.json
+          key: stock-alert-state-${{ steps.date.outputs.today }}
+
+      - name: 주가 감지 → (조건 충족 시) 보고
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          DART_API_KEY: ${{ secrets.DART_API_KEY }}
+          DART_CORP_CODE: ${{ secrets.DART_CORP_CODE }}
+          NAVER_CLIENT_ID: ${{ secrets.NAVER_CLIENT_ID }}
+          NAVER_CLIENT_SECRET: ${{ secrets.NAVER_CLIENT_SECRET }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python3 stock_alert_302440.py
