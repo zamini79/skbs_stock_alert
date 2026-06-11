@@ -30,6 +30,7 @@ import json
 import html
 import logging
 import datetime
+import email.utils
 import requests
 
 
@@ -68,6 +69,17 @@ STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
 THRESHOLD    = 5.0               # ±5%
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
+
+# 뉴스 수집 — 검색어 다양화(종목명 + 바이오 이슈), 시각 필터, 최종 건수
+NEWS_QUERIES = [
+    STOCK_NAME,
+    f"{STOCK_NAME} 백신",
+    f"{STOCK_NAME} 임상",
+    f"{STOCK_NAME} 계약",
+]
+NEWS_MAX_AGE_HOURS = float(os.environ.get("NEWS_MAX_AGE_HOURS", "24"))  # 최근 N시간 기사만
+NEWS_LIMIT         = int(os.environ.get("NEWS_LIMIT", "8"))            # 보고 포함 최대 건수
+_MIN_DT = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
 KIS_APP_KEY    = os.environ.get("KIS_APP_KEY", "여기에_앱키")
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "여기에_앱시크릿")
@@ -204,27 +216,72 @@ def get_disclosures():
 
 
 # ─────────────────────────────────────────────────────────────
-# 3) 네이버 뉴스 — 당일 헤드라인
+# 3) 네이버 뉴스 — 검색어 다양화 + 중복 제거 + 시각 필터 + 최신순
 # ─────────────────────────────────────────────────────────────
-def get_news(query, count=8):
+def _naver_news_search(query, display=10):
+    """네이버 뉴스 단일 검색 — raw 아이템 리스트 반환. 실패해도 [] 로 안전 처리."""
     try:
         r = requests.get(
             "https://openapi.naver.com/v1/search/news.json",
             headers={"X-Naver-Client-Id": NAVER_ID, "X-Naver-Client-Secret": NAVER_SECRET},
-            params={"query": query, "display": count, "sort": "date"},
+            params={"query": query, "display": display, "sort": "date"},
             timeout=10,
         )
         r.raise_for_status()
-        items = r.json().get("items", [])
+        return r.json().get("items", [])
     except Exception:
-        logging.warning("뉴스 조회 실패 — 뉴스 없이 진행", exc_info=True)
+        logging.warning("뉴스 검색 실패(query=%s) — 건너뜀", query, exc_info=True)
         return []
-    out = []
-    for i in items:
-        # <b> 강조 태그 제거 + HTML 엔티티(&quot; &amp; 등) 디코드 → 원문 제목
-        title = html.unescape(i["title"].replace("<b>", "").replace("</b>", ""))
-        out.append({"title": title, "link": i.get("link", "")})
-    return out
+
+
+def _parse_pub(s):
+    """pubDate(RFC822) → tz-aware datetime. 실패 시 None."""
+    try:
+        dt = email.utils.parsedate_to_datetime(s)
+        return dt.replace(tzinfo=datetime.timezone.utc) if dt.tzinfo is None else dt
+    except Exception:
+        return None
+
+
+def get_news(queries=None, max_age_hours=None, limit=None):
+    """여러 검색어로 뉴스를 모아 중복 제거 + 시각 필터 + 최신순 정렬 후 반환.
+
+    반환: [{"title", "link"}] (최신순, 최대 limit건). 어떤 단계가 실패해도 안전하게 폴백.
+    """
+    if isinstance(queries, str):
+        queries = [queries]
+    queries = NEWS_QUERIES if queries is None else queries
+    max_age_hours = NEWS_MAX_AGE_HOURS if max_age_hours is None else max_age_hours
+    limit = NEWS_LIMIT if limit is None else limit
+
+    collected, seen_links, seen_titles = [], set(), set()
+    for q in queries:
+        for i in _naver_news_search(q):
+            # <b> 강조 태그 제거 + HTML 엔티티 디코드 → 원문 제목
+            title = html.unescape(i.get("title", "").replace("<b>", "").replace("</b>", "")).strip()
+            if not title:
+                continue
+            link = i.get("link", "") or i.get("originallink", "")
+            norm = "".join(title.split())                 # 공백 무시 정규화 제목
+            if (link and link in seen_links) or norm in seen_titles:
+                continue                                  # 중복 제거
+            if max_age_hours and not _is_recent(i.get("pubDate", ""), max_age_hours):
+                continue                                  # 시각 필터
+            seen_links.add(link)
+            seen_titles.add(norm)
+            collected.append({"title": title, "link": link, "_pub": i.get("pubDate", "")})
+
+    collected.sort(key=lambda c: _parse_pub(c["_pub"]) or _MIN_DT, reverse=True)  # 최신순
+    return [{"title": c["title"], "link": c["link"]} for c in collected[:limit]]
+
+
+def _is_recent(pub_date_str, max_age_hours):
+    """pubDate가 최근 max_age_hours 이내인지. 파싱 실패 시 True(보수적으로 포함)."""
+    dt = _parse_pub(pub_date_str)
+    if dt is None:
+        return True
+    age_h = (datetime.datetime.now(datetime.timezone.utc) - dt).total_seconds() / 3600.0
+    return age_h <= max_age_hours
 
 
 # ─────────────────────────────────────────────────────────────
@@ -407,7 +464,7 @@ def main():
     try:
         kospi = get_kospi(token)              # 실패해도 None 반환(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
-        news = get_news(STOCK_NAME)           # 실패해도 [] 반환(보조)
+        news = get_news()                     # 다중 검색어·중복제거·시각필터(보조)
         report = analyze(p["change_rate"], p["price"], kospi, disclosures, news)
         send_telegram(report, parse_mode="HTML")
         mark_alerted()
