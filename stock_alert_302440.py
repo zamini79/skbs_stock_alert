@@ -192,7 +192,11 @@ def kis_token():
 
 
 def get_price(token, code):
-    """현재가, 전일대비 등락률 반환"""
+    """현재가·등락률 + 당일 고가/저가 및 그 전일대비 등락률 반환.
+
+    peak_rate = 당일 고가/저가 중 전일종가 대비 절대값이 큰 쪽(부호 유지).
+    장중 4% 찍고 되돌아온 경우도 트리거하기 위해 main()은 change_rate가 아닌 peak_rate로 판정.
+    """
     headers = {
         "authorization": f"Bearer {token}",
         "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
@@ -203,10 +207,21 @@ def get_price(token, code):
                      headers=headers, params=params, timeout=10)
     r.raise_for_status()
     out = r.json()["output"]
+    price = int(out["stck_prpr"])                 # 현재가
+    prev  = int(out["stck_sdpr"])                 # 기준가(전일 종가)
+    high  = int(out["stck_hgpr"])                 # 당일 고가
+    low   = int(out["stck_lwpr"])                 # 당일 저가
+    rate  = lambda v: (v - prev) / prev * 100 if prev else 0.0
+    high_rate, low_rate = rate(high), rate(low)
+    peak_rate = high_rate if abs(high_rate) >= abs(low_rate) else low_rate
     return {
-        "price": int(out["stck_prpr"]),          # 현재가
-        "change_rate": float(out["prdy_ctrt"]),   # 전일대비 등락률(%)
+        "price": price,
+        "change_rate": float(out["prdy_ctrt"]),   # 현재가 기준 등락률(%)
         "volume": int(out["acml_vol"]),           # 누적 거래량
+        "prev_close": prev,
+        "high": high, "low": low,
+        "high_rate": high_rate, "low_rate": low_rate,  # 고가/저가의 전일대비 등락률(%)
+        "peak_rate": peak_rate,                   # 장중 최대 변동폭(절대값 큰 쪽, 부호 유지)
     }
 
 
@@ -413,14 +428,17 @@ def _key_set(key):
 def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
     """사장님 보고서의 서술 부분(요약·원인·향후대응)을 JSON으로 생성하는 프롬프트."""
     rate = price_info["change_rate"]
+    peak = price_info.get("peak_rate", rate)
+    hi, lo = price_info.get("high_rate", rate), price_info.get("low_rate", rate)
     idx = lambda i: f"{i['value']:,.2f} ({i['rate']:+.2f}%)" if i else "조회불가"
     pharma = market.get("pharma")
     peer_txt = ", ".join(f"{p['name']} {p['rate']:+.2f}%" for p in peers) or "조회불가"
     return f"""당신은 상장 바이오·제약 기업 {STOCK_NAME}({STOCK_CODE})의 IR 애널리스트입니다.
-아래 데이터를 근거로 금일 주가 {direction}({rate:+.2f}%)에 대한 사장님 보고용 분석을 작성하세요.
+아래 데이터를 근거로 금일 주가 장중 최대 {direction}({peak:+.2f}%)에 대한 사장님 보고용 분석을 작성하세요.
+(현재가는 {rate:+.2f}%로, 장중 고점/저점에서 되돌림이 있었을 수 있으니 그 점도 고려)
 
 [지표]
-- 당사: {price_info['price']:,}원 ({rate:+.2f}%)
+- 당사: 현재 {price_info['price']:,}원 ({rate:+.2f}%), 장중 고가 {hi:+.2f}% / 저가 {lo:+.2f}% (최대 변동 {peak:+.2f}%)
 - KOSPI {idx(market.get('kospi'))} / KOSDAQ {idx(market.get('kosdaq'))} / 의약품업종 {(f"{pharma['rate']:+.2f}%" if pharma else '조회불가')}
 - 피어: {peer_txt}
 
@@ -495,6 +513,8 @@ def _llm_narrative(price_info, market, peers, disclosures, news, direction):
 def build_report(price_info, market, peers, narrative, news, direction):
     """사장님 보고용 텔레그램 HTML 리포트 조립. 수치는 코드가, 서술은 narrative(LLM)가 채운다."""
     price, rate = price_info["price"], price_info["change_rate"]
+    peak = price_info.get("peak_rate", rate)
+    hi, lo = price_info.get("high_rate", rate), price_info.get("low_rate", rate)
     n = narrative or {}
     esc = lambda v, default: html.escape(str(v).strip()) if v and str(v).strip() else default
     summary    = esc(n.get("summary"), "관련 공시·뉴스는 하단 참조 (AI 요약 미수행)")
@@ -511,7 +531,8 @@ def build_report(price_info, market, peers, narrative, news, direction):
         "사장님, 안녕하세요.",
         "금일 주가 동향 보고드립니다.",
         "",
-        f"금일 당사 주가는 <b>{price:,}원</b>으로 전일 대비 <b>{rate:+.2f}% {direction}</b> 중입니다.",
+        f"금일 당사 주가는 장중 전일 대비 <b>최대 {peak:+.2f}% {direction}</b>을 기록했습니다.",
+        f"(현재가 {price:,}원 / 현재 {rate:+.2f}% · 장중 고가 {hi:+.2f}% · 저가 {lo:+.2f}%)",
         summary,
         "",
         "<b>1. 상승/하락 원인</b>",
@@ -539,7 +560,7 @@ def build_report(price_info, market, peers, narrative, news, direction):
 
 def analyze(price_info, market, peers, disclosures, news):
     """사장님 보고용 HTML 리포트 문자열 생성. LLM이 없거나 실패해도 수치·뉴스로 보고한다."""
-    direction = _move_word(price_info["change_rate"])
+    direction = _move_word(price_info["peak_rate"])   # 장중 최대 변동폭 기준 표현
     narrative = _llm_narrative(price_info, market, peers, disclosures, news, direction)
     return build_report(price_info, market, peers, narrative, news, direction)
 
@@ -597,9 +618,12 @@ def main():
     # 감지 단계 — 매 실행(5분 간격) 도는 부분. 실패는 로그만 남기고 종료(관리자 도배 방지).
     token = kis_token()
     p = get_price(token, STOCK_CODE)
-    logging.info("%s %s원 (%+.2f%%)", STOCK_NAME, f"{p['price']:,}", p["change_rate"])
+    logging.info("%s %s원 (현재 %+.2f%% / 장중 고가 %+.2f%% · 저가 %+.2f%%)",
+                 STOCK_NAME, f"{p['price']:,}", p["change_rate"], p["high_rate"], p["low_rate"])
 
-    if abs(p["change_rate"]) < THRESHOLD:
+    # 트리거는 현재가가 아니라 '장중 최대 변동폭'(고가/저가 중 큰 쪽)으로 판정 —
+    # 장중 4% 찍고 되돌아온 경우도 놓치지 않기 위함.
+    if abs(p["peak_rate"]) < THRESHOLD:
         return
     if already_alerted_today():
         logging.info("오늘 이미 보고함 — 스킵")
