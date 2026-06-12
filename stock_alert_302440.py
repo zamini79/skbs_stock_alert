@@ -535,7 +535,6 @@ def build_report(price_info, market, peers, narrative, news, direction):
         *_news_lines_html(news),
         "",
         "감사합니다.",
-        "⚠️ 본 원인 분석은 AI 추정이며 투자판단의 근거가 아닙니다.",
     ]
     return "\n".join(lines)
 
