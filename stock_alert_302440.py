@@ -81,6 +81,18 @@ NEWS_MAX_AGE_HOURS = float(os.environ.get("NEWS_MAX_AGE_HOURS", "24"))  # 최근
 NEWS_LIMIT         = int(os.environ.get("NEWS_LIMIT", "8"))            # 보고 포함 최대 건수
 _MIN_DT = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
+# 시장/업종/피어 — 보고서 2·3번 항목용 (모두 기존 KIS 키로 조회)
+KOSPI_CODE         = "0001"
+KOSDAQ_CODE        = "1001"
+PHARMA_SECTOR_CODE = "0009"   # KOSPI 의약품(제약) 업종 지수
+PEER_STOCKS = [               # 주요 제약·바이오 피어그룹 (이름, 종목코드)
+    ("셀트리온",        "068270"),
+    ("삼성바이오로직스", "207940"),
+    ("유한양행",        "000100"),
+    ("GC녹십자",        "006280"),
+    ("한미약품",        "128940"),
+]
+
 KIS_APP_KEY    = os.environ.get("KIS_APP_KEY", "여기에_앱키")
 KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "여기에_앱시크릿")
 KIS_BASE       = "https://openapi.koreainvestment.com:9443"  # 실전투자
@@ -176,23 +188,38 @@ def get_price(token, code):
     }
 
 
-def get_kospi(token):
-    """시장 맥락: 코스피 지수 등락률"""
+def get_index(token, code):
+    """국내 지수 조회 → {'value': 지수값, 'rate': 등락률%} 또는 None(실패 시).
+
+    code: 0001=KOSPI, 1001=KOSDAQ, 0009=KOSPI 의약품 업종.
+    """
     headers = {
         "authorization": f"Bearer {token}",
         "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
         "tr_id": "FHPUP02100000",
     }
-    params = {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": "0001"}
+    params = {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code}
     try:
         r = requests.get(f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-index-price",
                          headers=headers, params=params, timeout=10)
         r.raise_for_status()
         out = r.json()["output"]
-        return float(out["bstp_nmix_prdy_ctrt"])  # 코스피 등락률(%)
+        return {"value": float(out["bstp_nmix_prpr"]),       # 지수 현재값
+                "rate": float(out["bstp_nmix_prdy_ctrt"])}   # 전일대비 등락률(%)
     except Exception:
-        logging.warning("코스피 지수 조회 실패 — 시장 맥락 없이 진행", exc_info=True)
+        logging.warning("지수 조회 실패(code=%s) — 해당 항목 생략", code, exc_info=True)
         return None
+
+
+def get_peers(token):
+    """피어그룹 등락률 [{'name', 'rate'}]. 개별 종목 실패는 건너뛴다(보조)."""
+    out = []
+    for name, code in PEER_STOCKS:
+        try:
+            out.append({"name": name, "rate": get_price(token, code)["change_rate"]})
+        except Exception:
+            logging.warning("피어 시세 실패(%s/%s) — 건너뜀", name, code, exc_info=True)
+    return out
 
 
 # ─────────────────────────────────────────────────────────────
@@ -306,26 +333,18 @@ def _news_lines_plain(news):
     return [f"- {n['title']}" for n in news]
 
 
-def _basic_report(change_rate, price, kospi_rate, disclosures, news, direction):
-    """ANTHROPIC_API_KEY 미설정 시 — AI 분석 없이 수집 원자료만 정리한 기본 보고서(텔레그램 HTML).
+def _move_word(rate):
+    """등락률 → 표현어. |등락|>=7% 급등/급락, 그 외 상승/하락."""
+    if abs(rate) >= 7.0:
+        return "급등" if rate > 0 else "급락"
+    return "상승" if rate > 0 else "하락"
 
-    동적 텍스트(공시·뉴스 제목)는 html.escape 처리하고, 뉴스는 클릭 가능한 링크로 렌더링한다.
-    """
-    disc = [html.escape(d) for d in disclosures] if disclosures else ["- 당일 신규 공시 없음"]
-    lines = [
-        f"📊 {STOCK_NAME} 주가 {direction} ({change_rate:+.2f}%)",
-        "⚠️ AI 분석 미수행(LLM API 키 미설정 또는 호출 실패) — 수집된 원자료만 전달합니다.",
-        "",
-        f"■ 현재가: {price:,}원 / 전일대비 {change_rate:+.2f}%",
-        f"■ 코스피 등락률: {kospi_rate if kospi_rate is not None else '조회불가'}%",
-        "",
-        "■ 당일 공시:",
-        *disc,
-        "",
-        "■ 당일 뉴스:",
-        *_news_lines_html(news),
-    ]
-    return "\n".join(lines)
+
+def _fmt_idx(idx):
+    """지수 dict({value,rate}) → '8,390.14 (+8.07% 상승)' / 없으면 '조회불가'."""
+    if not idx:
+        return "조회불가"
+    return f"{idx['value']:,.2f} ({idx['rate']:+.2f}% {_move_word(idx['rate'])})"
 
 
 def _key_set(key):
@@ -333,32 +352,36 @@ def _key_set(key):
     return bool(key) and not key.startswith("여기에")
 
 
-def _analysis_prompt(change_rate, price, kospi_rate, disclosures, news, direction):
-    """바이오·제약 섹터 맥락의 원인 분석 프롬프트(제공처 공통)."""
-    return f"""당신은 상장 바이오·제약 기업의 IR 애널리스트입니다.
-아래 데이터를 근거로 {STOCK_NAME}({STOCK_CODE})의 주가 {direction} 원인을 분석하세요.
+def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
+    """사장님 보고서의 서술 부분(요약·원인·향후대응)을 JSON으로 생성하는 프롬프트."""
+    rate = price_info["change_rate"]
+    idx = lambda i: f"{i['value']:,.2f} ({i['rate']:+.2f}%)" if i else "조회불가"
+    pharma = market.get("pharma")
+    peer_txt = ", ".join(f"{p['name']} {p['rate']:+.2f}%" for p in peers) or "조회불가"
+    return f"""당신은 상장 바이오·제약 기업 {STOCK_NAME}({STOCK_CODE})의 IR 애널리스트입니다.
+아래 데이터를 근거로 금일 주가 {direction}({rate:+.2f}%)에 대한 사장님 보고용 분석을 작성하세요.
 
-[주가 현황]
-- 현재가: {price:,}원 / 전일대비 {change_rate:+.2f}%
-- 코스피 지수 등락률: {kospi_rate if kospi_rate is not None else "조회불가"}%
+[지표]
+- 당사: {price_info['price']:,}원 ({rate:+.2f}%)
+- KOSPI {idx(market.get('kospi'))} / KOSDAQ {idx(market.get('kosdaq'))} / 의약품업종 {(f"{pharma['rate']:+.2f}%" if pharma else '조회불가')}
+- 피어: {peer_txt}
 
 [당일 공시]
-{chr(10).join(disclosures) if disclosures else "- 당일 신규 공시 없음"}
+{chr(10).join(disclosures) if disclosures else "- 없음"}
 
-[당일 뉴스 헤드라인]
+[당일 뉴스]
 {chr(10).join(_news_lines_plain(news))}
 
-[분석 지침]
-- 바이오·백신 섹터 특성(임상 결과, 품목허가, 기술수출/공급계약, 식약처·FDA, 모회사 SK케미칼 이슈 등)을 우선 고려.
-- 코스피 지수가 같은 방향으로 크게 움직였다면 '개별 이슈'가 아닌 '시장 전반 영향' 가능성을 명시.
-- 추정임을 분명히 하고, 근거가 약하면 신뢰도를 낮게 평가.
+[지침]
+- 바이오·백신 섹터 특성(임상, 품목허가, 기술수출/공급계약, 식약처·FDA, 모회사 SK케미칼 등) 우선 고려.
+- 지수·피어가 같은 방향으로 크게 움직였으면 '개별 이슈'보다 '시장 전반/업종 영향' 가능성을 명시.
+- 모두 추정이며, 근거가 약하면 단정하지 말 것.
 
-[출력 형식] — 텔레그램 보고용, 간결하게
-📊 {STOCK_NAME} 주가 {direction} ({change_rate:+.2f}%)
-■ 추정 원인:
-■ 근거:
-■ 신뢰도: (상/중/하 + 한 줄 사유)
-"""
+[출력] 아래 JSON 객체만 출력(설명·코드펜스 금지). 각 값은 한국어로 간결하게:
+{{"summary": "현 추이와 핵심 원인 한 줄 요약",
+  "cause_internal": "당사 호재/이슈 또는 수급 특징",
+  "cause_external": "매크로·뉴욕증시·지정학 등 대외 변수(없으면 '특이사항 없음')",
+  "outlook": "향후 대응/모니터링 포인트"}}"""
 
 
 def _call_claude(prompt):
@@ -386,30 +409,82 @@ def _call_gemini(prompt):
     return "".join(p.get("text", "") for p in parts)
 
 
-def analyze(change_rate, price, kospi_rate, disclosures, news):
-    """원인 분석 보고서(텔레그램 HTML 형식 문자열) 반환.
+def _llm_narrative(price_info, market, peers, disclosures, news, direction):
+    """서술 부분 dict({summary,cause_internal,cause_external,outlook}) 반환.
 
-    제공처 우선순위: Anthropic(Claude) → Google(Gemini) → 기본 보고서.
-    어느 LLM도 키가 없거나 호출이 실패하면 _basic_report()로 안전하게 폴백한다.
+    제공처 우선순위 Claude > Gemini. 키 없거나 호출/JSON 파싱 실패 시 None
+    → build_report가 수치·뉴스만으로 보고서를 구성한다.
     """
-    direction = "상승" if change_rate > 0 else "하락"
-
     if _key_set(ANTHROPIC_KEY):
         name, call = "Claude", _call_claude
     elif _key_set(GEMINI_API_KEY):
         name, call = "Gemini", _call_gemini
     else:
-        return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
-
-    prompt = _analysis_prompt(change_rate, price, kospi_rate, disclosures, news, direction)
+        return None
+    prompt = _narrative_prompt(price_info, market, peers, disclosures, news, direction)
     try:
-        ai_text = call(prompt)
+        raw = call(prompt).strip()
+        # 코드펜스/언어태그 제거 후 첫 '{' ~ 마지막 '}' 구간만 파싱
+        raw = raw[raw.find("{"): raw.rfind("}") + 1]
+        data = json.loads(raw)
+        return {k: str(data.get(k, "")).strip()
+                for k in ("summary", "cause_internal", "cause_external", "outlook")}
     except Exception:
-        logging.warning("%s 분석 실패 — 기본 보고서로 폴백", name, exc_info=True)
-        return _basic_report(change_rate, price, kospi_rate, disclosures, news, direction)
-    # AI 본문은 html.escape로 안전화(HTML 파싱 깨짐 방지) 후, 뉴스 원문 링크를 하이퍼링크로 첨부.
-    footer = "\n".join(["", "📰 관련 뉴스:", *_news_lines_html(news)]) if news else ""
-    return html.escape(ai_text) + footer
+        logging.warning("%s 분석/JSON 파싱 실패 — 수치·뉴스만으로 보고", name, exc_info=True)
+        return None
+
+
+def build_report(price_info, market, peers, narrative, news, direction):
+    """사장님 보고용 텔레그램 HTML 리포트 조립. 수치는 코드가, 서술은 narrative(LLM)가 채운다."""
+    price, rate = price_info["price"], price_info["change_rate"]
+    n = narrative or {}
+    esc = lambda v, default: html.escape(str(v).strip()) if v and str(v).strip() else default
+    summary    = esc(n.get("summary"), "관련 공시·뉴스는 하단 참조 (AI 요약 미수행)")
+    cause_int  = esc(n.get("cause_internal"), "하단 당일 공시·뉴스 참조")
+    cause_ext  = esc(n.get("cause_external"), "특이사항 없음")
+    outlook    = esc(n.get("outlook"), "장중 주가 추이 모니터링 지속")
+
+    pharma = market.get("pharma")
+    pharma_line = f"{pharma['rate']:+.2f}% {_move_word(pharma['rate'])}" if pharma else "조회불가"
+    peer_lines = [f" {html.escape(p['name'])}: {p['rate']:+.2f}% {_move_word(p['rate'])}" for p in peers] \
+        or [" - 조회불가"]
+
+    lines = [
+        "사장님, 안녕하세요.",
+        "금일 주가 동향 보고드립니다.",
+        "",
+        f"금일 당사 주가는 <b>{price:,}원</b>으로 전일 대비 <b>{rate:+.2f}% {direction}</b> 중입니다.",
+        summary,
+        "",
+        "<b>1. 상승/하락 원인</b>",
+        f" • [당사·수급] {cause_int}",
+        f" • [대외 변수] {cause_ext}",
+        "",
+        "<b>2. 국내 지수 및 업종 현황</b>",
+        f" KOSPI: {_fmt_idx(market.get('kospi'))}",
+        f" KOSDAQ: {_fmt_idx(market.get('kosdaq'))}",
+        f" 제약(의약품) 업종: {pharma_line}",
+        "",
+        "<b>3. 주요 제약사 동향</b>",
+        *peer_lines,
+        "",
+        "<b>4. 향후 대응</b>",
+        f" {outlook}",
+        "",
+        "<b>📰 관련 뉴스</b>",
+        *_news_lines_html(news),
+        "",
+        "감사합니다.",
+        "⚠️ 본 원인 분석은 AI 추정이며 투자판단의 근거가 아닙니다.",
+    ]
+    return "\n".join(lines)
+
+
+def analyze(price_info, market, peers, disclosures, news):
+    """사장님 보고용 HTML 리포트 문자열 생성. LLM이 없거나 실패해도 수치·뉴스로 보고한다."""
+    direction = _move_word(price_info["change_rate"])
+    narrative = _llm_narrative(price_info, market, peers, disclosures, news, direction)
+    return build_report(price_info, market, peers, narrative, news, direction)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -462,10 +537,15 @@ def main():
 
     # 여기서부터는 트리거됨 — 실패하면 '±%d%% 보고 누락'이므로 관리자에게 통지.
     try:
-        kospi = get_kospi(token)              # 실패해도 None 반환(보조)
+        market = {                            # 지수/업종 (개별 실패는 None, 보조)
+            "kospi":  get_index(token, KOSPI_CODE),
+            "kosdaq": get_index(token, KOSDAQ_CODE),
+            "pharma": get_index(token, PHARMA_SECTOR_CODE),
+        }
+        peers = get_peers(token)              # 피어그룹 등락률(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
         news = get_news()                     # 다중 검색어·중복제거·시각필터(보조)
-        report = analyze(p["change_rate"], p["price"], kospi, disclosures, news)
+        report = analyze(p, market, peers, disclosures, news)
         send_telegram(report, parse_mode="HTML")
         mark_alerted()
         logging.info("✅ 텔레그램 보고 완료")
