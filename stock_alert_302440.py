@@ -548,15 +548,28 @@ def analyze(price_info, market, peers, disclosures, news):
 # 5) 텔레그램 전송
 # ─────────────────────────────────────────────────────────────
 def send_telegram(text, parse_mode=None):
-    payload = {"chat_id": TELEGRAM_CHAT, "text": text}
-    if parse_mode:
-        payload["parse_mode"] = parse_mode
-        payload["disable_web_page_preview"] = True  # 링크 미리보기로 메시지가 비대해지는 것 방지
-    requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-        json=payload,
-        timeout=10,
-    ).raise_for_status()
+    """TELEGRAM_CHAT_ID(콤마로 여러 방 지정 가능)의 모든 방으로 전송.
+
+    일부 방이 실패해도 나머지는 보내고, '전부 실패'일 때만 예외를 던진다
+    (한 곳이라도 도달하면 main()이 보고 완료로 처리해 중복 전송을 막음).
+    """
+    chats = [c.strip() for c in str(TELEGRAM_CHAT).split(",") if c.strip()]
+    sent = 0
+    for chat in chats:
+        payload = {"chat_id": chat, "text": text}
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
+            payload["disable_web_page_preview"] = True  # 링크 미리보기로 메시지 비대해짐 방지
+        try:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                json=payload, timeout=10,
+            ).raise_for_status()
+            sent += 1
+        except Exception:
+            logging.warning("텔레그램 전송 실패(chat=%s) — 나머지 방은 계속", chat, exc_info=True)
+    if sent == 0:
+        raise RuntimeError("모든 텔레그램 대상 전송 실패")
 
 
 # ─────────────────────────────────────────────────────────────
