@@ -68,7 +68,7 @@ load_dotenv()
 # ─────────────────────────────────────────────────────────────
 STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
-THRESHOLD    = 5.0               # ±5%
+THRESHOLD    = 4.0               # ±4%
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
 TOKEN_FILE   = os.path.expanduser("~/.stock_alert_302440_token.json")  # KIS 토큰 캐시(~24h 재사용)
 
