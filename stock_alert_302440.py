@@ -422,7 +422,6 @@ def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
 [지표]
 - 당사: {price_info['price']:,}원 ({rate:+.2f}%)
 - KOSPI {idx(market.get('kospi'))} / KOSDAQ {idx(market.get('kosdaq'))} / 의약품업종 {(f"{pharma['rate']:+.2f}%" if pharma else '조회불가')}
-- 수급(장중 추정): {_flow_line(market.get('flow'))}
 - 피어: {peer_txt}
 
 [당일 공시]
@@ -438,7 +437,7 @@ def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
 
 [출력] 아래 JSON 객체만 출력(설명·코드펜스 금지). 각 값은 한국어로 간결하게:
 {{"summary": "현 추이와 핵심 원인 한 줄 요약",
-  "cause_internal": "당사 호재/이슈 또는 수급 특징",
+  "cause_internal": "당사 호재/이슈/공시·뉴스 특징",
   "cause_external": "매크로·뉴욕증시·지정학 등 대외 변수(없으면 '특이사항 없음')",
   "outlook": "향후 대응/모니터링 포인트"}}"""
 
@@ -514,10 +513,9 @@ def build_report(price_info, market, peers, narrative, news, direction):
         "",
         f"금일 당사 주가는 <b>{price:,}원</b>으로 전일 대비 <b>{rate:+.2f}% {direction}</b> 중입니다.",
         summary,
-        _flow_line(market.get("flow")),
         "",
         "<b>1. 상승/하락 원인</b>",
-        f" • [당사·수급] {cause_int}",
+        f" • [당사 이슈] {cause_int}",
         f" • [대외 변수] {cause_ext}",
         "",
         "<b>2. 국내 지수 및 업종 현황</b>",
@@ -600,7 +598,6 @@ def main():
             "kospi":  get_index(token, KOSPI_CODE),
             "kosdaq": get_index(token, KOSDAQ_CODE),
             "pharma": get_index(token, PHARMA_SECTOR_CODE),
-            "flow":   get_investor_flow(token, STOCK_CODE, p["price"]),
         }
         peers = get_peers(token)              # 피어그룹 등락률(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
