@@ -222,6 +222,34 @@ def get_peers(token):
     return out
 
 
+def get_investor_flow(token, code, price):
+    """장중 외국인/기관 '추정' 순매수를 억원으로 환산해 반환 {'foreign_eok','institution_eok'}.
+
+    KIS investor-trend-estimate(HHPTJ04160200)는 증권사 MTS와 동일한 '실시간 추정 가집계'로,
+    순매수 '수량(주)'만 제공한다 → 현재가를 곱해 금액(억원)으로 환산(추정치). 실패/미집계 시 None.
+    """
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
+        "tr_id": "HHPTJ04160200",
+    }
+    try:
+        r = requests.get(f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/investor-trend-estimate",
+                         headers=headers, params={"MKSC_SHRN_ISCD": code}, timeout=10)
+        r.raise_for_status()
+        rows = r.json().get("output2") or []
+        if not rows:
+            return None
+        last = rows[-1]  # 최신 시간대 = 당일 누적 추정치
+        frgn_qty = int(last.get("frgn_fake_ntby_qty") or 0)
+        orgn_qty = int(last.get("orgn_fake_ntby_qty") or 0)
+        return {"foreign_eok": frgn_qty * price / 1e8,
+                "institution_eok": orgn_qty * price / 1e8}
+    except Exception:
+        logging.warning("수급(외국인/기관) 조회 실패 — 수급 생략", exc_info=True)
+        return None
+
+
 # ─────────────────────────────────────────────────────────────
 # 2) OpenDART — 당일 공시
 # ─────────────────────────────────────────────────────────────
@@ -347,6 +375,14 @@ def _fmt_idx(idx):
     return f"{idx['value']:,.2f} ({idx['rate']:+.2f}% {_move_word(idx['rate'])})"
 
 
+def _flow_line(flow):
+    """수급 dict({foreign_eok,institution_eok}) → 헤더 한 줄. 없으면 '집계 전' 표기."""
+    if not flow:
+        return "(현재 수급: 집계 전/조회불가)"
+    return (f"(현재 수급(장중 추정): 외국인 {flow['foreign_eok']:+,.0f}억 원, "
+            f"기관 {flow['institution_eok']:+,.0f}억 원)")
+
+
 def _key_set(key):
     """환경변수 키가 실제 설정됐는지(빈 값/한글 플레이스홀더 아님) 판정."""
     return bool(key) and not key.startswith("여기에")
@@ -364,6 +400,7 @@ def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
 [지표]
 - 당사: {price_info['price']:,}원 ({rate:+.2f}%)
 - KOSPI {idx(market.get('kospi'))} / KOSDAQ {idx(market.get('kosdaq'))} / 의약품업종 {(f"{pharma['rate']:+.2f}%" if pharma else '조회불가')}
+- 수급(장중 추정): {_flow_line(market.get('flow'))}
 - 피어: {peer_txt}
 
 [당일 공시]
@@ -455,6 +492,7 @@ def build_report(price_info, market, peers, narrative, news, direction):
         "",
         f"금일 당사 주가는 <b>{price:,}원</b>으로 전일 대비 <b>{rate:+.2f}% {direction}</b> 중입니다.",
         summary,
+        _flow_line(market.get("flow")),
         "",
         "<b>1. 상승/하락 원인</b>",
         f" • [당사·수급] {cause_int}",
@@ -537,10 +575,11 @@ def main():
 
     # 여기서부터는 트리거됨 — 실패하면 '±%d%% 보고 누락'이므로 관리자에게 통지.
     try:
-        market = {                            # 지수/업종 (개별 실패는 None, 보조)
+        market = {                            # 지수/업종/수급 (개별 실패는 None, 보조)
             "kospi":  get_index(token, KOSPI_CODE),
             "kosdaq": get_index(token, KOSDAQ_CODE),
             "pharma": get_index(token, PHARMA_SECTOR_CODE),
+            "flow":   get_investor_flow(token, STOCK_CODE, p["price"]),
         }
         peers = get_peers(token)              # 피어그룹 등락률(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
