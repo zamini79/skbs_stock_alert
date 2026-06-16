@@ -204,22 +204,37 @@ def kis_token():
     return token
 
 
+def _kis_quote(token, path, tr_id, params, attempts=3):
+    """KIS 시세 GET 공통 — 'output'이 올 때까지 짧게 재시도(일시적 한도·블립 흡수). 실패 시 raise."""
+    headers = {
+        "authorization": f"Bearer {token}",
+        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
+        "tr_id": tr_id,
+    }
+    last = None
+    for i in range(attempts):
+        try:
+            r = requests.get(f"{KIS_BASE}{path}", headers=headers, params=params, timeout=10)
+            r.raise_for_status()
+            j = r.json()
+            if isinstance(j.get("output"), dict) and j["output"]:
+                return j["output"]
+            last = j.get("msg1") or "output 없음"
+        except Exception as e:
+            last = e
+        if i < attempts - 1:
+            time.sleep(0.6)   # 초당 호출 한도/일시 오류 완화
+    raise RuntimeError(f"KIS 응답 이상({tr_id}): {last}")
+
+
 def get_price(token, code):
     """현재가·등락률 + 당일 고가/저가 및 그 전일대비 등락률 반환.
 
     peak_rate = 당일 고가/저가 중 전일종가 대비 절대값이 큰 쪽(부호 유지).
     장중 4% 찍고 되돌아온 경우도 트리거하기 위해 main()은 change_rate가 아닌 peak_rate로 판정.
     """
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
-        "tr_id": "FHKST01010100",
-    }
-    params = {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code}
-    r = requests.get(f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-price",
-                     headers=headers, params=params, timeout=10)
-    r.raise_for_status()
-    out = r.json()["output"]
+    out = _kis_quote(token, "/uapi/domestic-stock/v1/quotations/inquire-price",
+                     "FHKST01010100", {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
     price = int(out["stck_prpr"])                 # 현재가
     prev  = int(out["stck_sdpr"])                 # 기준가(전일 종가)
     high  = int(out["stck_hgpr"])                 # 당일 고가
@@ -243,17 +258,9 @@ def get_index(token, code):
 
     code: 0001=KOSPI, 1001=KOSDAQ, 0009=KOSPI 의약품 업종.
     """
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
-        "tr_id": "FHPUP02100000",
-    }
-    params = {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code}
     try:
-        r = requests.get(f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/inquire-index-price",
-                         headers=headers, params=params, timeout=10)
-        r.raise_for_status()
-        out = r.json()["output"]
+        out = _kis_quote(token, "/uapi/domestic-stock/v1/quotations/inquire-index-price",
+                         "FHPUP02100000", {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code})
         return {"value": float(out["bstp_nmix_prpr"]),       # 지수 현재값
                 "rate": float(out["bstp_nmix_prdy_ctrt"])}   # 전일대비 등락률(%)
     except Exception:
@@ -612,14 +619,19 @@ def send_telegram(text, parse_mode=None):
         if parse_mode:
             payload["parse_mode"] = parse_mode
             payload["disable_web_page_preview"] = True  # 링크 미리보기로 메시지 비대해짐 방지
-        try:
-            requests.post(
-                f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                json=payload, timeout=10,
-            ).raise_for_status()
-            sent += 1
-        except Exception:
-            logging.warning("텔레그램 전송 실패(chat=%s) — 나머지 방은 계속", chat, exc_info=True)
+        for attempt in range(3):                        # 일시적 네트워크 타임아웃 대비 재시도
+            try:
+                requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                    json=payload, timeout=15,
+                ).raise_for_status()
+                sent += 1
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(1.5)
+                    continue
+                logging.warning("텔레그램 전송 실패(chat=%s) — 나머지 방은 계속", chat, exc_info=True)
     if sent == 0:
         raise RuntimeError("모든 텔레그램 대상 전송 실패")
 
