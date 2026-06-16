@@ -83,6 +83,19 @@ NEWS_MAX_AGE_HOURS = float(os.environ.get("NEWS_MAX_AGE_HOURS", "24"))  # 최근
 NEWS_LIMIT         = int(os.environ.get("NEWS_LIMIT", "8"))            # 보고 포함 최대 건수
 _MIN_DT = datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
 
+# 보고서 '1. 상승/하락 원인' 분석용 뉴스 검색어 그룹 (4개 차원)
+# 검색은 넓게(QUERIES) 하되, 제목에 관련어(TOKENS)가 없는 기사는 버려 노이즈 제거.
+COMPANY_QUERIES = [STOCK_NAME, "SK바사", "SK바이오사이언스 백신", "SK바이오사이언스 공급"]  # 당사
+COMPANY_TOKENS  = ["SK바이오사이언스", "SK바사"]   # 제목에 이 중 하나 필수(SK바이오팜·반도체 IDT 노이즈 차단)
+MACRO_QUERIES   = ["뉴욕증시 마감", "뉴욕증시", "미국증시"]       # 글로벌 매크로·개장 전
+MACRO_TOKENS    = ["뉴욕", "나스닥", "다우", "S&P", "연준", "Fed", "FOMC", "금리", "유가", "환율", "엔캐리", "미국"]
+MARKET_QUERIES  = ["코스피 마감", "코스닥 마감", "사이드카"]      # 장중 국내 시장
+MARKET_TOKENS   = ["코스피", "코스닥", "증시", "사이드카", "서킷브레이커"]
+SECTOR_QUERIES  = ["제약 바이오", "백신", "임상", "신약"]         # 제약·바이오 섹터
+SECTOR_TOKENS   = ["제약", "바이오", "백신", "임상", "FDA", "신약", "식약처", "의약품", "팬데믹", "전염병"]
+ANALYSIS_NEWS_AGE_HOURS = 36    # 전일~당일 포괄
+ANALYSIS_NEWS_LIMIT     = 6     # 그룹별 분석에 넘길 헤드라인 수
+
 # 시장/업종/피어 — 보고서 2·3번 항목용 (모두 기존 KIS 키로 조회)
 KOSPI_CODE         = "0001"
 KOSDAQ_CODE        = "1001"
@@ -335,9 +348,10 @@ def _parse_pub(s):
         return None
 
 
-def get_news(queries=None, max_age_hours=None, limit=None):
-    """여러 검색어로 뉴스를 모아 중복 제거 + 시각 필터 + 최신순 정렬 후 반환.
+def get_news(queries=None, max_age_hours=None, limit=None, must_include=None):
+    """여러 검색어로 뉴스를 모아 중복 제거 + 시각 필터 + (선택)제목 관련어 필터 + 최신순 정렬.
 
+    must_include: 토큰 리스트. 제목에 이 중 하나도 없으면 버린다(분야 무관 노이즈 제거).
     반환: [{"title", "link"}] (최신순, 최대 limit건). 어떤 단계가 실패해도 안전하게 폴백.
     """
     if isinstance(queries, str):
@@ -353,6 +367,8 @@ def get_news(queries=None, max_age_hours=None, limit=None):
             title = html.unescape(i.get("title", "").replace("<b>", "").replace("</b>", "")).strip()
             if not title:
                 continue
+            if must_include and not any(tok in title for tok in must_include):
+                continue                                  # 분야 관련어 없는 기사 제외
             link = i.get("link", "") or i.get("originallink", "")
             norm = "".join(title.split())                 # 공백 무시 정규화 제목
             if (link and link in seen_links) or norm in seen_titles:
@@ -425,38 +441,48 @@ def _key_set(key):
     return bool(key) and not key.startswith("여기에")
 
 
-def _narrative_prompt(price_info, market, peers, disclosures, news, direction):
-    """사장님 보고서의 서술 부분(요약·원인·향후대응)을 JSON으로 생성하는 프롬프트."""
+def _narrative_prompt(price_info, market, peers, disclosures, news, direction, news_ctx):
+    """사장님 보고서의 서술 부분(요약·4대 원인·향후대응)을 JSON으로 생성하는 프롬프트.
+
+    news_ctx: {'company','macro','market','sector'} 각각 뉴스 dict 리스트.
+    '1. 상승/하락 원인'은 인과 중심·초간결·수치 배제·하십시오체로 4개 차원 작성.
+    """
     rate = price_info["change_rate"]
     peak = price_info.get("peak_rate", rate)
-    hi, lo = price_info.get("high_rate", rate), price_info.get("low_rate", rate)
-    idx = lambda i: f"{i['value']:,.2f} ({i['rate']:+.2f}%)" if i else "조회불가"
-    pharma = market.get("pharma")
-    peer_txt = ", ".join(f"{p['name']} {p['rate']:+.2f}%" for p in peers) or "조회불가"
+
+    def block(items):
+        return chr(10).join(_news_lines_plain(items))
+
     return f"""당신은 상장 바이오·제약 기업 {STOCK_NAME}({STOCK_CODE})의 IR 애널리스트입니다.
-아래 데이터를 근거로 금일 주가 장중 최대 {direction}({peak:+.2f}%)에 대한 사장님 보고용 분석을 작성하세요.
-(현재가는 {rate:+.2f}%로, 장중 고점/저점에서 되돌림이 있었을 수 있으니 그 점도 고려)
+연동된 네이버 뉴스를 근거로 금일 국내 증시 변동 원인과 당사·섹터 동향을 '초간결 요약'으로 작성하세요.
+(금일 당사 주가는 장중 전일 대비 최대 {peak:+.2f}% {direction}, 현재 {rate:+.2f}%)
 
-[지표]
-- 당사: 현재 {price_info['price']:,}원 ({rate:+.2f}%), 장중 고가 {hi:+.2f}% / 저가 {lo:+.2f}% (최대 변동 {peak:+.2f}%)
-- KOSPI {idx(market.get('kospi'))} / KOSDAQ {idx(market.get('kosdaq'))} / 의약품업종 {(f"{pharma['rate']:+.2f}%" if pharma else '조회불가')}
-- 피어: {peer_txt}
+[당사 관련 뉴스]
+{block(news_ctx.get('company'))}
 
-[당일 공시]
-{chr(10).join(disclosures) if disclosures else "- 없음"}
+[글로벌 매크로·뉴욕증시 뉴스]
+{block(news_ctx.get('macro'))}
 
-[당일 뉴스]
-{chr(10).join(_news_lines_plain(news))}
+[국내 증시 뉴스(코스피/코스닥/사이드카)]
+{block(news_ctx.get('market'))}
 
-[지침]
-- 바이오·백신 섹터 특성(임상, 품목허가, 기술수출/공급계약, 식약처·FDA, 모회사 SK케미칼 등) 우선 고려.
-- 지수·피어가 같은 방향으로 크게 움직였으면 '개별 이슈'보다 '시장 전반/업종 영향' 가능성을 명시.
-- 모두 추정이며, 근거가 약하면 단정하지 말 것.
+[제약·바이오 섹터 뉴스]
+{block(news_ctx.get('sector'))}
 
-[출력] 아래 JSON 객체만 출력(설명·코드펜스 금지). 각 값은 한국어로 간결하게:
+[작성 조건 — 엄수]
+- 인과관계 중심: 뉴스를 나열하지 말고, 그 뉴스로 인해 '상승'했는지 '하락'했는지 원인-결과를 명확히 연결할 것.
+- 극단적 간결성: 각 항목 2~3문장 이내 핵심만.
+- 수치 데이터 전면 배제: 지수 종가, 순매수 대금, 환율, '올해 몇 번째' 등 통계성 수치/누적횟수 일절 기재 금지.
+- 100% 팩트 기반: 기사로 검증되지 않은 추측성 전망·자의적 의견 배제, 당일 확인된 인과관계만.
+- 문체: '하십시오체'로 사족 없이.
+- 해당 사항이 뉴스에 없으면 '특이사항 없음'으로 적을 것.
+
+[출력] 아래 JSON 객체만 출력(설명·코드펜스 금지). 각 값은 위 조건을 지켜 한국어로:
 {{"summary": "현 추이와 핵심 원인 한 줄 요약",
-  "cause_internal": "당사 호재/이슈/공시·뉴스 특징",
-  "cause_external": "매크로·뉴욕증시·지정학 등 대외 변수(없으면 '특이사항 없음')",
+  "cause_company": "당사 주가 변동 원인 — 특정 뉴스가 당사 주가 상승/하락에 미친 영향과 핵심 이유",
+  "cause_macro": "대외 변수 및 투심 영향 — 뉴욕증시 마감 등이 국내 개장 전 투자심리에 미친 상승/하락 요인",
+  "cause_market": "장중 국내 시장 변동 원인 — 코스피/코스닥 등락을 이끈 핵심 원인 및 사이드카 발동 여부",
+  "cause_sector": "제약·바이오 섹터 동향 및 원인 — 특정 이슈가 섹터 투자심리 호조/악화에 미친 원인",
   "outlook": "향후 대응/모니터링 포인트"}}"""
 
 
@@ -485,8 +511,8 @@ def _call_gemini(prompt):
     return "".join(p.get("text", "") for p in parts)
 
 
-def _llm_narrative(price_info, market, peers, disclosures, news, direction):
-    """서술 부분 dict({summary,cause_internal,cause_external,outlook}) 반환.
+def _llm_narrative(price_info, market, peers, disclosures, news, direction, news_ctx):
+    """서술 부분 dict({summary,cause_company,cause_macro,cause_market,cause_sector,outlook}) 반환.
 
     제공처 우선순위 Claude > Gemini. 키 없거나 호출/JSON 파싱 실패 시 None
     → build_report가 수치·뉴스만으로 보고서를 구성한다.
@@ -497,14 +523,15 @@ def _llm_narrative(price_info, market, peers, disclosures, news, direction):
         name, call = "Gemini", _call_gemini
     else:
         return None
-    prompt = _narrative_prompt(price_info, market, peers, disclosures, news, direction)
+    prompt = _narrative_prompt(price_info, market, peers, disclosures, news, direction, news_ctx)
     try:
         raw = call(prompt).strip()
         # 코드펜스/언어태그 제거 후 첫 '{' ~ 마지막 '}' 구간만 파싱
         raw = raw[raw.find("{"): raw.rfind("}") + 1]
         data = json.loads(raw)
         return {k: str(data.get(k, "")).strip()
-                for k in ("summary", "cause_internal", "cause_external", "outlook")}
+                for k in ("summary", "cause_company", "cause_macro",
+                          "cause_market", "cause_sector", "outlook")}
     except Exception:
         logging.warning("%s 분석/JSON 파싱 실패 — 수치·뉴스만으로 보고", name, exc_info=True)
         return None
@@ -517,10 +544,12 @@ def build_report(price_info, market, peers, narrative, news, direction):
     hi, lo = price_info.get("high_rate", rate), price_info.get("low_rate", rate)
     n = narrative or {}
     esc = lambda v, default: html.escape(str(v).strip()) if v and str(v).strip() else default
-    summary    = esc(n.get("summary"), "관련 공시·뉴스는 하단 참조 (AI 요약 미수행)")
-    cause_int  = esc(n.get("cause_internal"), "하단 당일 공시·뉴스 참조")
-    cause_ext  = esc(n.get("cause_external"), "특이사항 없음")
-    outlook    = esc(n.get("outlook"), "장중 주가 추이 모니터링 지속")
+    summary       = esc(n.get("summary"), "관련 공시·뉴스는 하단 참조 (AI 요약 미수행)")
+    cause_company = esc(n.get("cause_company"), "하단 당일 공시·뉴스 참조")
+    cause_macro   = esc(n.get("cause_macro"), "특이사항 없음")
+    cause_market  = esc(n.get("cause_market"), "특이사항 없음")
+    cause_sector  = esc(n.get("cause_sector"), "특이사항 없음")
+    outlook       = esc(n.get("outlook"), "장중 주가 추이 모니터링 지속")
 
     pharma = market.get("pharma")
     pharma_line = f"{pharma['rate']:+.2f}% {_move_word(pharma['rate'])}" if pharma else "조회불가"
@@ -536,8 +565,10 @@ def build_report(price_info, market, peers, narrative, news, direction):
         summary,
         "",
         "<b>1. 상승/하락 원인</b>",
-        f" • [당사 이슈] {cause_int}",
-        f" • [대외 변수] {cause_ext}",
+        f" • 당사 주가 변동 원인: {cause_company}",
+        f" • 글로벌 매크로·개장 전 동향: {cause_macro}",
+        f" • 장중 국내 시장 변동: {cause_market}",
+        f" • 제약·바이오 섹터 동향: {cause_sector}",
         "",
         "<b>2. 국내 지수 및 업종 현황</b>",
         f" KOSPI: {_fmt_idx(market.get('kospi'))}",
@@ -558,10 +589,10 @@ def build_report(price_info, market, peers, narrative, news, direction):
     return "\n".join(lines)
 
 
-def analyze(price_info, market, peers, disclosures, news):
+def analyze(price_info, market, peers, disclosures, news, news_ctx):
     """사장님 보고용 HTML 리포트 문자열 생성. LLM이 없거나 실패해도 수치·뉴스로 보고한다."""
     direction = _move_word(price_info["peak_rate"])   # 장중 최대 변동폭 기준 표현
-    narrative = _llm_narrative(price_info, market, peers, disclosures, news, direction)
+    narrative = _llm_narrative(price_info, market, peers, disclosures, news, direction, news_ctx)
     return build_report(price_info, market, peers, narrative, news, direction)
 
 
@@ -638,8 +669,15 @@ def main():
         }
         peers = get_peers(token)              # 피어그룹 등락률(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
-        news = get_news()                     # 다중 검색어·중복제거·시각필터(보조)
-        report = analyze(p, market, peers, disclosures, news)
+        news = get_news()                     # 📰 관련 뉴스 푸터용(당사 중심)
+        # '1. 상승/하락 원인' 분석용 — 4개 차원 뉴스 그룹(전일~당일)
+        news_ctx = {
+            "company": get_news(COMPANY_QUERIES, ANALYSIS_NEWS_AGE_HOURS, ANALYSIS_NEWS_LIMIT, COMPANY_TOKENS),
+            "macro":   get_news(MACRO_QUERIES,   ANALYSIS_NEWS_AGE_HOURS, ANALYSIS_NEWS_LIMIT, MACRO_TOKENS),
+            "market":  get_news(MARKET_QUERIES,  ANALYSIS_NEWS_AGE_HOURS, ANALYSIS_NEWS_LIMIT, MARKET_TOKENS),
+            "sector":  get_news(SECTOR_QUERIES,  ANALYSIS_NEWS_AGE_HOURS, ANALYSIS_NEWS_LIMIT, SECTOR_TOKENS),
+        }
+        report = analyze(p, market, peers, disclosures, news, news_ctx)
         send_telegram(report, parse_mode="HTML")
         mark_alerted()
         logging.info("✅ 텔레그램 보고 완료")
