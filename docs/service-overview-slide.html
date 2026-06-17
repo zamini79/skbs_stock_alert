@@ -1,0 +1,171 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<title>SK바이오사이언스 주가 변동 자동 보고 에이전트</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    background: #e9edf3; display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 24px; color: #1b2430;
+  }
+  /* 16:9 슬라이드 */
+  .slide {
+    width: 1280px; height: 720px; background: #fff; border-radius: 22px;
+    box-shadow: 0 24px 70px rgba(15,39,64,.22); padding: 46px 56px 40px;
+    display: flex; flex-direction: column; position: relative; overflow: hidden;
+  }
+  .slide::before {
+    content: ""; position: absolute; top: -120px; right: -120px;
+    width: 360px; height: 360px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, #ffe1db, transparent 70%);
+  }
+
+  .eyebrow { color: #e8341c; font-weight: 800; font-size: 16px; letter-spacing: .8px; }
+  h1 { font-size: 38px; font-weight: 800; margin-top: 6px; letter-spacing: -.6px; }
+  h1 .light { color: #6b7280; font-weight: 700; }
+  .sub { color: #5b6675; font-size: 17px; margin-top: 9px; line-height: 1.5; max-width: 1040px; }
+  .sub b { color: #1b2430; }
+
+  /* 파이프라인 */
+  .flow { display: flex; align-items: stretch; margin-top: 26px; }
+  .step { flex: 1; background: #f7f9fc; border: 1px solid #e6ebf2; border-radius: 15px;
+          padding: 18px 16px; text-align: center; }
+  .step .icon { font-size: 34px; line-height: 1; }
+  .step .t { font-size: 18px; font-weight: 800; margin-top: 10px; }
+  .step .d { font-size: 14px; color: #6b7280; margin-top: 7px; line-height: 1.45; }
+  .step .d b { color: #e8341c; }
+  .arrow { display: flex; align-items: center; color: #d2492f; font-size: 26px; font-weight: 800; padding: 0 8px; }
+
+  /* 2단 그리드 */
+  .cols { display: flex; gap: 22px; margin-top: 24px; flex: 1; }
+  .card { flex: 1; border: 1px solid #e6ebf2; border-radius: 16px; padding: 20px 22px; }
+  .card h2 { font-size: 14px; font-weight: 800; letter-spacing: .4px; color: #0f2740;
+             display: flex; align-items: center; gap: 8px; }
+  .card h2 .pill { background: #0f2740; color: #fff; font-size: 11px; border-radius: 999px; padding: 2px 9px; }
+
+  /* 좌: 2단계 알림 */
+  .tier { display: flex; gap: 12px; align-items: flex-start; margin-top: 16px; }
+  .tier .lvl { flex: none; width: 46px; height: 46px; border-radius: 12px; color: #fff;
+               font-weight: 800; font-size: 15px; display: flex; align-items: center; justify-content: center; }
+  .tier.t1 .lvl { background: #e8341c; }
+  .tier.t2 .lvl { background: #f0a020; }
+  .tier .tx .h { font-size: 16px; font-weight: 800; }
+  .tier .tx .h span { color: #e8341c; }
+  .tier.t2 .tx .h span { color: #c47b00; }
+  .tier .tx .p { font-size: 13.5px; color: #6b7280; margin-top: 3px; line-height: 1.45; }
+  .cap { margin-top: 16px; font-size: 12.5px; color: #8a93a0; border-top: 1px dashed #e0e5ee; padding-top: 12px; }
+  .cap b { color: #e8341c; }
+
+  /* 우: 보고서 구성 */
+  .items { margin-top: 14px; display: grid; grid-template-columns: 1fr 1fr; gap: 12px 18px; }
+  .item .it { font-size: 14.5px; font-weight: 800; }
+  .item .id { font-size: 12.5px; color: #6b7280; margin-top: 3px; line-height: 1.4; }
+  .item .it i { font-style: normal; color: #e8341c; }
+
+  /* 하단 배지 */
+  .badges { display: flex; gap: 14px; margin-top: 22px; }
+  .badge { flex: 1; background: #0f2740; color: #fff; border-radius: 14px; padding: 15px 18px;
+           display: flex; align-items: baseline; gap: 10px; }
+  .badge .bt { font-size: 21px; font-weight: 800; white-space: nowrap; }
+  .badge .bd { font-size: 13px; color: #aebfd2; line-height: 1.35; }
+  .foot { margin-top: 12px; font-size: 11.5px; color: #9aa3b0; text-align: right; }
+</style>
+</head>
+<body>
+  <div class="slide">
+    <div>
+      <div class="eyebrow">SK바이오사이언스 (302440) · IR 자동화 에이전트</div>
+      <h1>주가 변동 자동 보고 <span class="light">— 운영 방식</span></h1>
+      <div class="sub">평일 장중, 주가가 크게 움직이면 <b>원인을 4차원으로 자동 분석</b>해 텔레그램으로 보고합니다.
+        <b>별도 서버·관리 없이</b> GitHub Actions가 5분마다 무인 실행합니다.</div>
+    </div>
+
+    <!-- 파이프라인 -->
+    <div class="flow">
+      <div class="step">
+        <div class="icon">⏰</div>
+        <div class="t">자동 실행</div>
+        <div class="d">평일 09:00~15:30<br>GitHub이 5분마다 가동</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">📈</div>
+        <div class="t">변동 감지</div>
+        <div class="d">장중 <b>고가·저가</b> 기준<br>최대 변동폭으로 판정</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">🤖</div>
+        <div class="t">원인 분석 (AI)</div>
+        <div class="d">공시·뉴스·지수·피어<br>4차원 인과 분석</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="step">
+        <div class="icon">💬</div>
+        <div class="t">텔레그램 보고</div>
+        <div class="d">IR방으로 자동 발송<br>추정임을 항상 명시</div>
+      </div>
+    </div>
+
+    <!-- 2단 영역 -->
+    <div class="cols">
+      <!-- 좌: 2단계 알림 -->
+      <div class="card">
+        <h2><span class="pill">발송 규칙</span> 2단계 알림 · 하루 최대 2회</h2>
+        <div class="tier t1">
+          <div class="lvl">1차</div>
+          <div class="tx">
+            <div class="h">장중 <span>±4%</span> 도달 → 풀 보고서</div>
+            <div class="p">원인 4차원 분석 + 지수·피어 + 관련 뉴스까지 종합 보고</div>
+          </div>
+        </div>
+        <div class="tier t2">
+          <div class="lvl">2차</div>
+          <div class="tx">
+            <div class="h">추가로 <span>±5%</span> 도달 → 요약 속보</div>
+            <div class="p">변동폭·지수·피어 수치만 빠르게 추가 1회 (1차 이후 심화 시)</div>
+          </div>
+        </div>
+        <div class="cap">움직임이 <b>±4% 미만</b>이면 아무것도 보내지 않고 조용히 종료 → 꼭 필요할 때만 보고가 도착합니다.</div>
+      </div>
+
+      <!-- 우: 보고서 구성 -->
+      <div class="card">
+        <h2><span class="pill">보고서 내용</span> 사장님 보고용 구성</h2>
+        <div class="items">
+          <div class="item">
+            <div class="it">1 · <i>상승/하락 원인</i></div>
+            <div class="id">당사 · 글로벌 매크로 · 국내 시장 · 제약바이오 섹터 4차원</div>
+          </div>
+          <div class="item">
+            <div class="it">2 · 지수 현황</div>
+            <div class="id">KOSPI · KOSDAQ · 의약품 업종 등락</div>
+          </div>
+          <div class="item">
+            <div class="it">3 · 주요 제약사</div>
+            <div class="id">피어 5종 등락 · <i>급등락 시 기사 링크</i></div>
+          </div>
+          <div class="item">
+            <div class="it">4 · 향후 대응</div>
+            <div class="id">모니터링 포인트 · 예정 일정 일자 병기</div>
+          </div>
+          <div class="item" style="grid-column: 1 / -1;">
+            <div class="it">📰 관련 뉴스</div>
+            <div class="id">당사 우선 + 섹터 보충, 관련어 필터로 노이즈 제거한 클릭 링크</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 하단 배지 -->
+    <div class="badges">
+      <div class="badge"><div class="bt">서버 0대</div><div class="bd">PC·맥 켤 필요 없음, GitHub이 대행</div></div>
+      <div class="badge"><div class="bt">운영비 0원</div><div class="bd">시세·뉴스·AI 분석 전 구간 무료</div></div>
+      <div class="badge"><div class="bt">24시간 무인</div><div class="bd">키는 암호화 보관, 사람 개입 불필요</div></div>
+    </div>
+    <div class="foot">데이터: 한국투자증권(KIS) · OpenDART · 네이버 뉴스 · AI 원인 분석(Claude / Gemini)</div>
+  </div>
+</body>
+</html>
