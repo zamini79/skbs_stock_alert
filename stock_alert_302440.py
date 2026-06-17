@@ -70,6 +70,9 @@ STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
 THRESHOLD    = 4.0               # ±4% — 1차(풀 보고서) 트리거
 THRESHOLD2   = 5.0               # ±5% — 2차(데이터 요약 속보) 트리거. 1차 이후 추가 1회
+# 장 운영 시간 가드(KST 평일). cron이 지연 실행돼도 장시간 외엔 보고하지 않도록 스크립트가 직접 차단.
+MARKET_OPEN  = os.environ.get("MARKET_OPEN", "09:00")   # HH:MM (KST)
+MARKET_CLOSE = os.environ.get("MARKET_CLOSE", "15:30")  # HH:MM (KST)
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
 TOKEN_FILE   = os.path.expanduser("~/.stock_alert_302440_token.json")  # KIS 토큰 캐시(~24h 재사용)
 
@@ -728,6 +731,24 @@ def send_telegram(text, parse_mode=None):
 
 
 # ─────────────────────────────────────────────────────────────
+# 장 운영 시간 가드 (GitHub cron 지연 실행 대비 — 코드 차원 방어)
+# ─────────────────────────────────────────────────────────────
+def within_market_hours(now_kst=None):
+    """현재(KST)가 평일 장 운영 시간(MARKET_OPEN~MARKET_CLOSE)인지. 주말·장시간 외면 False.
+
+    GitHub Actions 예약(cron)은 부하 시 수 시간 지연 실행될 수 있어, cron 창만 믿으면
+    장 마감 후에도 보고가 나간다(실측: KST 18시·19시 발송). 시각 비교는 UTC+9로 직접 계산해
+    러너 TZ 설정과 무관하게 동작한다.
+    """
+    now = now_kst or (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=9))
+    if now.weekday() >= 5:                        # 5=토, 6=일
+        return False
+    to_min = lambda s: int(s.split(":")[0]) * 60 + int(s.split(":")[1])
+    cur = now.hour * 60 + now.minute
+    return to_min(MARKET_OPEN) <= cur <= to_min(MARKET_CLOSE)
+
+
+# ─────────────────────────────────────────────────────────────
 # 중복 알림 방지(하루 최대 2회 — 1차/2차 단계별 1회씩)
 # ─────────────────────────────────────────────────────────────
 def alerted_tiers_today():
@@ -755,6 +776,12 @@ def mark_alerted(tier):
 # ─────────────────────────────────────────────────────────────
 def main():
     setup_logging()
+
+    # 장 운영 시간 가드 — cron이 지연 실행돼도 평일 09:00~15:30(KST) 밖이면 아무것도 하지 않음.
+    # (IGNORE_MARKET_HOURS=1 로 수동 점검 시 우회 가능)
+    if os.environ.get("IGNORE_MARKET_HOURS") != "1" and not within_market_hours():
+        logging.info("장 운영 시간(평일 %s~%s KST) 외 — 스킵", MARKET_OPEN, MARKET_CLOSE)
+        return
 
     # 감지 단계 — 매 실행(5분 간격) 도는 부분. 실패는 로그만 남기고 종료(관리자 도배 방지).
     token = kis_token()

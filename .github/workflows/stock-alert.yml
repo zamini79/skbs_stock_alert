@@ -28,19 +28,21 @@ jobs:
       - name: 의존성 설치
         run: pip install -r requirements.txt
 
-      # 하루 1회 보고 쿨다운 상태 파일을 'KST 날짜'별 캐시 키로 보존.
-      # - 그날 첫 실행: 캐시 미스 → 스크립트 실행 → (조건 충족 시) 보고 → 상태 파일 생성
-      #                 → 잡 종료 시 오늘 날짜 키로 캐시 저장.
-      # - 같은 날 이후 실행: 캐시 히트 → 상태 파일 복원 → 스크립트가 '이미 보고함' 판정 → 스킵.
+      # 발송 쿨다운(하루 최대 2회·단계별 1회) 상태 파일을 실행 간 보존.
+      # ⚠️ actions/cache 키는 immutable(한 번 생기면 갱신 안 됨)이라, 고정 키를 쓰면
+      #    같은 날 보고를 보내도 상태가 저장되지 않아 다음 실행이 중복 발송한다(실측).
+      #    → 매 실행 '고유 키'로 새로 저장하고, restore-keys 접두사로 '오늘 최신' 상태를 복원한다.
       - name: 오늘 날짜(KST) 산출
         id: date
         run: echo "today=$(TZ=Asia/Seoul date +%F)" >> "$GITHUB_OUTPUT"
 
-      - name: 보고 상태 파일 캐시
+      - name: 보고 상태 파일 캐시 (매 실행 새 키 저장 + 오늘 최신 복원)
         uses: actions/cache@v4
         with:
           path: ~/.stock_alert_302440_state.json
-          key: stock-alert-state-${{ steps.date.outputs.today }}
+          key: stock-alert-state-${{ steps.date.outputs.today }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            stock-alert-state-${{ steps.date.outputs.today }}-
 
       - name: 주가 감지 → (조건 충족 시) 보고
         env:
