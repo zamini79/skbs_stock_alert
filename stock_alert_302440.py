@@ -191,14 +191,26 @@ def kis_token():
     except Exception:
         pass  # 캐시 없음/손상 → 신규 발급
 
-    r = requests.post(
-        f"{KIS_BASE}/oauth2/tokenP",
-        json={"grant_type": "client_credentials",
-              "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
-        timeout=10,
-    )
-    r.raise_for_status()
-    data = r.json()
+    # 토큰 발급은 감지 파이프라인의 첫 호출이라 여기서 죽으면 실행 전체가 실패(CI 실패 메일).
+    # KIS의 일시적 네트워크 오류(타임아웃·RemoteDisconnected)를 흡수하도록 짧은 백오프 재시도.
+    data = None
+    for attempt in range(3):
+        try:
+            r = requests.post(
+                f"{KIS_BASE}/oauth2/tokenP",
+                json={"grant_type": "client_credentials",
+                      "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+            break
+        except Exception:
+            if attempt < 2:
+                logging.warning("KIS 토큰 발급 실패 — 재시도(%d/2)", attempt + 1, exc_info=True)
+                time.sleep(1.5 * (attempt + 1))   # 1.5s → 3s 백오프
+                continue
+            raise                                  # 3회 모두 실패 시 전파(설계대로 비정상 종료)
     token = data["access_token"]
     try:
         with open(TOKEN_FILE, "w") as f:
