@@ -795,9 +795,15 @@ def main():
         logging.info("장 운영 시간(평일 %s~%s KST) 외 — 스킵", MARKET_OPEN, MARKET_CLOSE)
         return
 
-    # 감지 단계 — 매 실행(5분 간격) 도는 부분. 실패는 로그만 남기고 종료(관리자 도배 방지).
-    token = kis_token()
-    p = get_price(token, STOCK_CODE)
+    # 감지 단계 — 매 실행(5분 간격) 도는 부분. KIS 일시 장애(타임아웃·연결끊김·이상응답)는
+    # 재시도로도 안 되면 '이번 폴링만 조용히 스킵(정상 종료)'한다. 5분 뒤 다음 폴링이 자동 복구하므로
+    # CI 실패(=All jobs have failed 메일)로 도배하지 않기 위함. 진짜 장기 장애면 보고 부재로 드러난다.
+    try:
+        token = kis_token()
+        p = get_price(token, STOCK_CODE)
+    except (requests.exceptions.RequestException, RuntimeError) as e:
+        logging.warning("감지 단계 일시 실패 — 이번 폴링 스킵(다음 5분 폴링이 재시도): %s", e)
+        return
     logging.info("%s %s원 (현재 %+.2f%% / 장중 고가 %+.2f%% · 저가 %+.2f%%)",
                  STOCK_NAME, f"{p['price']:,}", p["change_rate"], p["high_rate"], p["low_rate"])
 
