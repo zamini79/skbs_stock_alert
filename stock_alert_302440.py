@@ -768,6 +768,11 @@ def main():
         logging.info("장 운영 시간(평일 %s~%s KST) 외 — 스킵", MARKET_OPEN, MARKET_CLOSE)
         return
 
+    # 오늘 이미 보고했으면 KIS 호출 전에 즉시 종료 — 발송 후 남은 폴링의 불필요한 KIS 호출 방지.
+    if already_alerted_today():
+        logging.info("오늘 이미 보고함 — 스킵(KIS 호출 생략)")
+        return
+
     # 감지 단계 — 매 실행(5분 간격) 도는 부분. KIS 일시 장애(타임아웃·연결끊김·이상응답)는
     # 재시도로도 안 되면 '이번 폴링만 조용히 스킵(정상 종료)'한다. 5분 뒤 다음 폴링이 자동 복구하므로
     # CI 실패(=All jobs have failed 메일)로 도배하지 않기 위함. 진짜 장기 장애면 보고 부재로 드러난다.
@@ -784,9 +789,6 @@ def main():
     # 장중 5% 찍고 되돌아온 경우도 놓치지 않기 위함. 하루 1회만 발송.
     abs_peak = abs(p["peak_rate"])
     if abs_peak < THRESHOLD:
-        return
-    if already_alerted_today():
-        logging.info("오늘 이미 보고함 — 스킵 (peak %+.2f%%)", p["peak_rate"])
         return
 
     # 여기서부터는 트리거됨 — 실패하면 보고 누락이므로 관리자에게 통지.
