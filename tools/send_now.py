@@ -40,6 +40,10 @@ def main():
 
     report = sa.analyze(p, market, peers, disclosures, news, news_ctx)
     sa.send_telegram(report, parse_mode="HTML")
+    # 관련 뉴스는 별도 메시지로(운영 main()과 동일 동작)
+    news_msg = sa.build_news_message(news)
+    if news_msg:
+        sa.send_telegram(news_msg, parse_mode="HTML")
     print(f"✅ 강제 발송 완료 → {sa.TELEGRAM_CHAT} "
           f"(장중 최대 {p['peak_rate']:+.2f}%, 현재 {p['change_rate']:+.2f}%)")
 

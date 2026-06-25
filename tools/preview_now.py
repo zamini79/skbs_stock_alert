@@ -41,6 +41,11 @@ def main():
     print("\n" + "=" * 70)
     print(strip_html(report))
     print("=" * 70)
+    news_msg = sa.build_news_message(news)
+    if news_msg:
+        print("[별도 메시지] 관련 뉴스")
+        print(strip_html(news_msg))
+        print("=" * 70)
     print(f"[미발송] 장중 최대 {p['peak_rate']:+.2f}%, 현재 {p['change_rate']:+.2f}%")
 
 
