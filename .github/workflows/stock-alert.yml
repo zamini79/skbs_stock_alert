@@ -9,10 +9,9 @@ on:
     - cron: "0-30/5 6 * * 1-5"  # UTC 06:00~06:30 = KST 15:00~15:30, 5분 간격, 월~금
   workflow_dispatch:             # Actions 탭에서 수동 실행(테스트용)
 
-# 동시 실행 방지: 이전 실행이 끝나기 전 새 실행이 겹치지 않도록.
-concurrency:
-  group: stock-alert
-  cancel-in-progress: false
+# concurrency 그룹은 두지 않는다: GitHub 러너 백로그(러너 배정 지연) 시 5분마다 오는 트리거가
+# pending 큐에 쌓이면서 서로를 취소해 'All jobs were cancelled' 메일이 무더기로 발송됐다(실측: 야간 45건).
+# 중복 발송은 상태 파일(하루 1회)과 장시간 가드가 막으므로 concurrency 없이도 안전하다.
 
 jobs:
   alert:
