@@ -24,6 +24,7 @@ SK바이오사이언스(코스피 302440) 주가 ±5% 변동 감지 → 원인 �
 """
 
 import os
+import re
 import json
 import time
 import html
@@ -781,24 +782,52 @@ def _naver_price(code):
             "peak_rate": hr if abs(hr) >= abs(lr) else lr}
 
 
-def shadow_compare_naver(kp):
-    """KIS(kp)와 네이버 시세를 비교해 일치 여부를 로그로 남긴다(실패해도 운영 무영향)."""
+def _naver_pharma_sector():
+    """네이버 '제약' 업종(261) 지수 등락률(%) 반환. 실패 시 None. (HTML 파싱 — 취약)
+
+    구성종목 셀은 style에 'padding-right'를 갖는데 업종 지수 등락률(헤더)엔 없음 → 그 첫 %가 업종 지수.
+    """
+    r = requests.get("https://finance.naver.com/sise/sise_group_detail.naver?type=upjong&no=261",
+                     headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
+    r.raise_for_status()
+    html = r.content.decode("euc-kr", "ignore")
+    for m in re.finditer(r"([+-]?\d+\.\d+)\s*%", html):
+        if "padding-right" not in html[max(0, m.start() - 40):m.start()]:
+            return float(m.group(1))
+    return None
+
+
+def shadow_compare_naver(token, kp):
+    """KIS(kp)와 네이버 시세를 비교해 로그로 남긴다(실패해도 운영 무영향).
+
+    ① 종목 시세(트리거 핵심): 고가/저가/전일종가 일치 여부.
+    ② 제약바이오 섹터: KIS 의약품(KRX 0009) vs 네이버 제약(WICS 261) — 다른 지수라
+       값 일치가 아니라 방향·추세가 같이 가는지 나란히 참고.
+    """
+    # ① 종목 시세 비교
     try:
         nv = _naver_price(STOCK_CODE)
+        same = all(kp.get(k) == nv.get(k) for k in ("prev_close", "high", "low"))
+        logging.info(
+            "[검증 시세] %s | 현재가 %s/%s · 전일 %s/%s · 고가 %s/%s · 저가 %s/%s · peak %+.2f%%/%+.2f%%",
+            "일치" if same else "불일치(확인필요)",
+            f"{kp['price']:,}", f"{nv['price']:,}",
+            f"{kp['prev_close']:,}", f"{nv['prev_close']:,}",
+            f"{kp['high']:,}", f"{nv['high']:,}",
+            f"{kp['low']:,}", f"{nv['low']:,}",
+            kp["peak_rate"], nv["peak_rate"])
     except Exception:
-        logging.warning("[검증] 네이버 조회 실패 — 이번 비교 스킵", exc_info=True)
-        return
-    # 고가/저가/전일종가는 그 순간 안정값 → 트리거 핵심. 이 세 값 일치로 판정
-    # (현재가는 두 API 호출 시각차로 한 틱 다를 수 있어 참고만).
-    same = all(kp.get(k) == nv.get(k) for k in ("prev_close", "high", "low"))
-    logging.info(
-        "[검증 KIS vs 네이버] %s | 현재가 %s/%s · 전일 %s/%s · 고가 %s/%s · 저가 %s/%s · peak %+.2f%%/%+.2f%%",
-        "일치" if same else "불일치(확인필요)",
-        f"{kp['price']:,}", f"{nv['price']:,}",
-        f"{kp['prev_close']:,}", f"{nv['prev_close']:,}",
-        f"{kp['high']:,}", f"{nv['high']:,}",
-        f"{kp['low']:,}", f"{nv['low']:,}",
-        kp["peak_rate"], nv["peak_rate"])
+        logging.warning("[검증 시세] 네이버 조회 실패 — 스킵", exc_info=True)
+
+    # ② 제약바이오 섹터 비교 (다른 지수 — 방향 참고용)
+    try:
+        kis_ph = get_index(token, PHARMA_SECTOR_CODE)          # {value, rate} 또는 None
+        nv_ph = _naver_pharma_sector()                         # rate(%) 또는 None
+        kis_r = f"{kis_ph['rate']:+.2f}%" if kis_ph else "조회불가"
+        nv_r = f"{nv_ph:+.2f}%" if nv_ph is not None else "조회불가"
+        logging.info("[검증 섹터] KIS 의약품 %s vs 네이버 제약 %s (다른 지수 — 방향 참고)", kis_r, nv_r)
+    except Exception:
+        logging.warning("[검증 섹터] 비교 실패 — 스킵", exc_info=True)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -827,7 +856,7 @@ def main():
         return
     logging.info("%s %s원 (현재 %+.2f%% / 장중 고가 %+.2f%% · 저가 %+.2f%%)",
                  STOCK_NAME, f"{p['price']:,}", p["change_rate"], p["high_rate"], p["low_rate"])
-    shadow_compare_naver(p)   # (임시) KIS vs 네이버 검증 — 발송 영향 없음
+    shadow_compare_naver(token, p)   # (임시) KIS vs 네이버 검증(시세+섹터) — 발송 영향 없음
 
     # 트리거는 현재가가 아니라 '장중 최대 변동폭'(고가/저가 중 큰 쪽)으로 판정 —
     # 장중 5% 찍고 되돌아온 경우도 놓치지 않기 위함. 하루 1회만 발송.
