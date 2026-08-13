@@ -759,6 +759,49 @@ def mark_alerted():
 
 
 # ─────────────────────────────────────────────────────────────
+# (임시) 네이버 시세 섀도우 검증 — KIS 교체 전, 동일 결과인지 5분마다 로그로 비교.
+#   운영 동작(트리거/발송)은 KIS 그대로. 여기서는 발송 없이 로그만 남긴다.
+#   같은 실행 안에서 돌아 KIS 토큰 추가 발급(=문자)이 없다. 검증 끝나면 제거 예정.
+# ─────────────────────────────────────────────────────────────
+def _naver_price(code):
+    """네이버 폴링 API로 KIS get_price와 같은 형태의 시세 dict 반환(검증용)."""
+    r = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}",
+                     timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+    r.raise_for_status()
+    d = r.json()["datas"][0]
+    to_int = lambda s: int(str(s).replace(",", ""))
+    price = to_int(d["closePrice"])                       # 장중엔 현재가
+    prev = price - to_int(d["compareToPreviousClosePrice"])
+    high, low = to_int(d["highPrice"]), to_int(d["lowPrice"])
+    rate = lambda v: (v - prev) / prev * 100 if prev else 0.0
+    hr, lr = rate(high), rate(low)
+    return {"price": price, "prev_close": prev, "high": high, "low": low,
+            "change_rate": float(d["fluctuationsRatio"]),
+            "high_rate": hr, "low_rate": lr,
+            "peak_rate": hr if abs(hr) >= abs(lr) else lr}
+
+
+def shadow_compare_naver(kp):
+    """KIS(kp)와 네이버 시세를 비교해 일치 여부를 로그로 남긴다(실패해도 운영 무영향)."""
+    try:
+        nv = _naver_price(STOCK_CODE)
+    except Exception:
+        logging.warning("[검증] 네이버 조회 실패 — 이번 비교 스킵", exc_info=True)
+        return
+    # 고가/저가/전일종가는 그 순간 안정값 → 트리거 핵심. 이 세 값 일치로 판정
+    # (현재가는 두 API 호출 시각차로 한 틱 다를 수 있어 참고만).
+    same = all(kp.get(k) == nv.get(k) for k in ("prev_close", "high", "low"))
+    logging.info(
+        "[검증 KIS vs 네이버] %s | 현재가 %s/%s · 전일 %s/%s · 고가 %s/%s · 저가 %s/%s · peak %+.2f%%/%+.2f%%",
+        "일치" if same else "불일치(확인필요)",
+        f"{kp['price']:,}", f"{nv['price']:,}",
+        f"{kp['prev_close']:,}", f"{nv['prev_close']:,}",
+        f"{kp['high']:,}", f"{nv['high']:,}",
+        f"{kp['low']:,}", f"{nv['low']:,}",
+        kp["peak_rate"], nv["peak_rate"])
+
+
+# ─────────────────────────────────────────────────────────────
 def main():
     setup_logging()
 
@@ -784,6 +827,7 @@ def main():
         return
     logging.info("%s %s원 (현재 %+.2f%% / 장중 고가 %+.2f%% · 저가 %+.2f%%)",
                  STOCK_NAME, f"{p['price']:,}", p["change_rate"], p["high_rate"], p["low_rate"])
+    shadow_compare_naver(p)   # (임시) KIS vs 네이버 검증 — 발송 영향 없음
 
     # 트리거는 현재가가 아니라 '장중 최대 변동폭'(고가/저가 중 큰 쪽)으로 판정 —
     # 장중 5% 찍고 되돌아온 경우도 놓치지 않기 위함. 하루 1회만 발송.
