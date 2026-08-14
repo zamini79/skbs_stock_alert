@@ -20,43 +20,40 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
   발송은 본 보고서 + '관련 뉴스'를 **텔레그램 메시지 2건**으로 분리해 보낸다.
 
 ## 파이프라인 구조 (stock_alert_302440.py)
-1. **감지** — `kis_token()` → `get_price()` : KIS API로 현재가·등락률 + **당일 고가/저가**와 그 등락률 조회
+1. **감지** — `get_price()` : 네이버 금융 공개 API로 현재가·등락률 + **당일 고가/저가**와 그 등락률 조회(무인증·무문자)
 2. **트리거(하루 1회)** — `peak_rate` = 당일 고가/저가 중 전일종가 대비 절대값이 큰 쪽(부호 유지)
    → **장중 5% 찍고 되돌아온 경우도 포착**(현재가 기준 아님).
    - `abs(peak_rate) >= THRESHOLD(5.0)` 이고 당일 미발송 → `analyze()` 풀 원인분석 보고서 발송.
-   - **당일 이미 보고했으면 KIS 호출 전에 즉시 스킵** — 발송 후 남은 5분 폴링의 불필요한 KIS 호출 방지(시세 로그는 발송 후 미기록).
+   - **당일 이미 보고했으면 시세 호출 전에 즉시 스킵** — 발송 후 남은 5분 폴링의 불필요한 호출 방지(시세 로그는 발송 후 미기록).
    - 보고서 발송 직후 `build_news_message()`로 '관련 뉴스'를 **별도 메시지**로 추가 발송(best-effort).
    - `build_report`의 '4. 향후 대응'은 고정 문구(`OUTLOOK_FIXED`). 급등/급락(±7%↑) 피어엔 기사 링크 표시.
 3. **원인 수집**
    - `get_disclosures()` : OpenDART 당일 공시 목록
    - `get_news()` : 네이버 뉴스(다중 검색어·중복제거·시각필터·최신순)
-   - `get_index()` : KOSPI(0001)·KOSDAQ(1001)·의약품 업종(0009) 지수값+등락률
-   - `get_peers()` : 피어그룹(셀트리온·삼바·유한양행·녹십자·한미) 등락률
-   - `get_investor_flow()` : 장중 외국인/기관 추정 순매수(수량×현재가 → 억원, 추정치)
+   - `get_index()` : KOSPI·KOSDAQ 지수값+등락률(네이버) / `get_pharma_sector()` : 네이버 '제약' 업종 등락률
+   - `get_peers()` : 피어그룹(셀트리온·삼바·유한양행·녹십자·한미) 등락률(네이버 다종목 일괄)
 4. **분석/조립** — `analyze()` : `_llm_narrative()`(LLM이 요약·원인·향후대응을 **JSON**으로 생성)
    + `build_report()`(수치는 코드가, 서술은 LLM이 채워 '사장님 보고서' HTML 조립)
 5. **전송** — `send_telegram(parse_mode="HTML")`
 
 ## 구현 세부 (코드를 읽어야 알 수 있는 것 — stock_alert_302440.py)
-- **KIS `tr_id`/엔드포인트 매핑** (변경 시 깨지기 쉬움):
-  - `get_price()` → `tr_id=FHKST01010100`, `inquire-price`, 시장구분 `J`. 필드 `stck_prpr`(현재가)·`prdy_ctrt`(등락률)·`acml_vol`(거래량)·`stck_hgpr`(고가)·`stck_lwpr`(저가)·`stck_sdpr`(전일종가=기준가). 고가/저가 등락률과 `peak_rate`를 계산해 반환.
-  - `get_index()` → `tr_id=FHPUP02100000`, `inquire-index-price`, 시장구분 `U`. 코드: KOSPI `0001`·KOSDAQ `1001`·의약품업종 `0009`.
-    필드: 지수값 `bstp_nmix_prpr`, 등락률 `bstp_nmix_prdy_ctrt`. 응답에 업종명 필드 없음(0009=의약품은 지수값대로 확정).
-    참고: **2026년 KOSPI는 ~8,000대**(전년比 +165% 강세장, 1월 ~4,200 → 6월 ~8,900). 값이 커 보여도 정상.
-  - 피어그룹(`PEER_STOCKS`)·업종코드(`PHARMA_SECTOR_CODE=0009`)는 설정 상수. 시세는 `get_price()` 재사용.
-  - `get_investor_flow()` → `tr_id=HHPTJ04160200`, `investor-trend-estimate`, 파라미터 `MKSC_SHRN_ISCD`(주의: FID_ 아님).
-    응답 `output2` 배열의 **추정 순매수 수량**(`frgn_fake_ntby_qty`/`orgn_fake_ntby_qty`)만 제공 → 현재가 곱해 억원 환산(추정).
-    증권사 MTS의 장중 실시간 수급과 동일 성격. 장 마감 후엔 거의 0.
-- **KIS_BASE는 실전투자 도메인**(`openapi.koreainvestment.com:9443`). 모의투자 키를 쓰면 동작하지 않음.
-- **환경변수 미설정 시 fail-fast 안 함**: 모든 키가 `여기에_...` 한글 플레이스홀더 문자열로 폴백한다.
-  키가 비면 에러 없이 잘못된 요청을 보내므로, 디버깅 시 인증 실패/이상 응답을 먼저 의심할 것.
+- **네이버 금융 공개 API 매핑** (비공식·무인증 — 예고 없이 바뀔 수 있어 깨지기 쉬움. `NAVER_*_URL` 상수):
+  - `get_price(code)` → `polling.finance.naver.com/api/realtime/domestic/stock/{code}` → `datas[0]`.
+    필드: `closePrice`(장중=현재가)·`compareToPreviousClosePrice`(전일대비)·`fluctuationsRatio`(등락률%)·`highPrice`(고가)·`lowPrice`(저가)·`accumulatedTradingVolume`(거래량). **전일종가 = 현재가 − 전일대비**로 계산, `peak_rate`도 계산.
+  - `get_index(code)` → `.../index/{code}` (`KOSPI`/`KOSDAQ`). 필드: `closePrice`(지수값)·`fluctuationsRatio`(등락률).
+    참고: **2026년 KOSPI는 ~7,000대** 강세장. 값이 커 보여도 정상.
+  - `get_peers()` → `.../stock/{code1,code2,...}` 다종목 일괄. `PEER_STOCKS` 순서 유지.
+  - `get_pharma_sector()` → `finance.naver.com/sise/sise_group_detail.naver?type=upjong&no=261`(제약 업종) **HTML 파싱**.
+    구성종목 셀은 style에 `padding-right`가 있고 업종 지수 등락률(헤더)엔 없음 → 그런 첫 `%`가 업종 지수. EUC-KR 디코드. 실패 시 조회불가.
+    ⚠️ KIS의 KRX 의약품 지수(0009)와는 **다른 지수**(네이버/WICS '제약'). 값은 다르나 방향은 함께 감(검증 완료).
+- **`_won()`**: `'37,550'`/`'-800'`/`'-'` 등 문자열 → int(숫자 아님·빈값은 0).
+- **환경변수 미설정 시 fail-fast 안 함**: 나머지 키(DART/네이버검색/텔레그램/LLM)가 `여기에_...` 플레이스홀더로 폴백한다.
+  키가 비면 에러 없이 잘못된 요청을 보내므로, 디버깅 시 인증 실패/이상 응답을 먼저 의심할 것. (시세는 이제 무인증)
 - **에러 처리 정책 (TODO #3 완료)**: 보조 수집(`get_kospi`·`get_disclosures`·`get_news`)은 실패해도
   각각 `None`/`[]`를 반환하고 경고 로그만 남긴 뒤 진행한다(전체 중단 안 함). `analyze()`는 Claude API
   실패 시 `_basic_report()`로 폴백. **관리자 알림(`alert_admin`)은 트리거(±5%) 이후 보고 단계 실패 시에만**
   발송 — 5분마다 도는 단순 시세조회 실패로 도배하지 않기 위함.
-  - **KIS 일시 오류 흡수**: `kis_token()`/`_kis_quote()`는 타임아웃·RemoteDisconnected 등 일시 네트워크 오류에
-    짧은 백오프로 3회 재시도한다(특히 토큰 발급은 파이프라인 첫 호출).
-  - **감지 단계 실패는 조용히 스킵(exit 0)**: 재시도로도 안 되는 KIS 일시 장애(`RequestException`·이상응답
+  - **감지 단계 실패는 조용히 스킵(exit 0)**: 네이버 일시 장애(`RequestException`·응답이상
     `RuntimeError`)는 `main()`이 경고 로그만 남기고 **정상 종료**한다. 5분 폴링이라 다음 폴링이 자동 복구하므로,
     'All jobs have failed' 메일 도배를 막기 위함. 단 **예상 못한 예외(버그성)는 그대로 전파**돼 CI 실패로 드러난다.
     트리거(±4%) 이후 보고 단계 실패는 여전히 `alert_admin` + 비정상 종료.
@@ -78,7 +75,7 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
   아닌 '시장 전반 영향' 가능성을 명시하게 할 것.
 
 ## API 키 (모두 무료 발급, 환경변수명)
-- `KIS_APP_KEY`, `KIS_APP_SECRET` — 한국투자증권 KIS Developers (계좌 필요)
+- **시세: 키 불필요** — 네이버 금융 공개 API 사용(KIS 제거됨). 접속 문자·계좌·인증 없음.
 - `DART_API_KEY` — OpenDART 인증키
 - `DART_CORP_CODE` — SK바이오사이언스의 **DART 고유번호 = `01319899`**(8자리). 종목코드(302440)와 다름.
   `tools/find_corp_code.py`로 조회한 값. 비어 있으면 공시 단계가 동작하지 않는다.
@@ -100,7 +97,7 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
   5분 간격 + 수동 실행. 키는 GitHub Secrets.
   - **장 운영 시간 가드(코드 차원)**: GitHub cron은 부하 시 **수 시간 지연 실행**될 수 있어(실측: KST 18·19시 오발송),
     `main()`이 시작 직후 `within_market_hours()`로 평일 `MARKET_OPEN`~`MARKET_CLOSE`(기본 09:00~15:30 KST) 밖이면
-    KIS 호출 전에 스킵한다. 수동 점검은 `IGNORE_MARKET_HOURS=1`로 우회. (cron 창만 믿지 않는 방어 계층)
+    시세 호출 전에 스킵한다. 수동 점검은 `IGNORE_MARKET_HOURS=1`로 우회. (cron 창만 믿지 않는 방어 계층)
   - **쿨다운 상태 캐시**: `actions/cache` 키는 immutable이라 **고정 키로는 같은 날 갱신이 안 돼 중복 발송**된다(실측).
     매 실행 고유 키(`...-${run_id}-${run_attempt}`)로 저장하고 `restore-keys` 접두사로 '오늘 최신' 상태를 복원한다.
 - **TODO #5 완료** — 뉴스 클릭 링크 + 정확도 보강: 다중 검색어(`NEWS_QUERIES` = 종목명 + 백신/임상/계약),
@@ -116,5 +113,6 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
 
 ## 주의사항
 - 상장사 IR 자료다. **AI 분석은 추정**임을 보고서에 항상 명시(코드의 프롬프트에 반영돼 있음).
-- KIS API는 실전/모의 키가 다르고 호출 한도(rate limit)가 있으니 폴링 간격에 유의.
+- 시세는 네이버 금융 **비공식 공개 API**다. 무인증·무문자·실시간이지만 예고 없이 구조가 바뀔 수 있음
+  (그 경우 감지 단계가 조용히 스킵 → 보고 부재로 드러남). 약관상 개인 조회용이라 대량·상업적 재배포는 유의.
 - 키를 절대 코드·로그·커밋에 노출하지 말 것. `.env`와 상태 파일은 `.gitignore`로 제외돼 있음.

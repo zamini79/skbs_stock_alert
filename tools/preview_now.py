@@ -21,14 +21,13 @@ def strip_html(s: str) -> str:
 
 def main():
     sa.setup_logging()
-    token = sa.kis_token()
-    p = sa.get_price(token, sa.STOCK_CODE)
+    p = sa.get_price(sa.STOCK_CODE)
     market = {
-        "kospi":  sa.get_index(token, sa.KOSPI_CODE),
-        "kosdaq": sa.get_index(token, sa.KOSDAQ_CODE),
-        "pharma": sa.get_index(token, sa.PHARMA_SECTOR_CODE),
+        "kospi":  sa.get_index(sa.KOSPI_CODE),
+        "kosdaq": sa.get_index(sa.KOSDAQ_CODE),
+        "pharma": sa.get_pharma_sector(),
     }
-    peers = sa.get_peers(token)
+    peers = sa.get_peers()
     disclosures = sa.get_disclosures()
     news = sa.get_related_news()
     news_ctx = {

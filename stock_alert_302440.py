@@ -4,15 +4,15 @@
 SK바이오사이언스(코스피 302440) 주가 ±5% 변동 감지 → 원인 분석 → 텔레그램 보고
 
 [흐름]
-  1) 한국투자증권(KIS) API로 현재가/전일종가 조회 → 등락률 계산
+  1) 네이버 금융 공개 API로 현재가/전일종가/고가/저가 조회 → 등락률 계산 (무인증·무문자)
   2) 장중 최대 변동폭(peak)이 |peak| >= THRESHOLD(5%)면 트리거(하루 1회 풀 보고서):
-       - 재료: OpenDART 당일 공시 + 네이버 뉴스 + KIS 지수/피어
+       - 재료: OpenDART 당일 공시 + 네이버 뉴스 + 네이버 지수/피어/제약 업종
   3) 위 재료를 Claude/Gemini에 보내 "원인 분석 보고서" 생성 (바이오 섹터 맥락 반영)
   4) 텔레그램 봇으로 지정 방에 전송 — 본 보고서 + '관련 뉴스'를 별도 메시지 2건으로
   5) 하루 중복 알림 방지 — 상태 파일에 보고한 날짜를 기록
 
 [필요 키 — 모두 무료]
-  - KIS Developers (한국투자증권 계좌 + 앱키/시크릿): https://apiportal.koreainvestment.com
+  - (시세) 네이버 금융 공개 API: 키 불필요
   - OpenDART 인증키: https://opendart.fss.or.kr
   - 네이버 검색 API (Client ID/Secret): https://developers.naver.com
   - 텔레그램 봇 토큰(@BotFather) + chat_id
@@ -62,7 +62,7 @@ load_dotenv()
 
 # ─────────────────────────────────────────────────────────────
 # 설정 — 환경변수로 두는 걸 권장 (키를 코드에 직접 박지 마세요)
-# zsh 예: export KIS_APP_KEY="..."  를 ~/.zshrc 에 추가
+# zsh 예: export DART_API_KEY="..."  를 ~/.zshrc 에 추가
 #   또는 .env 파일에 KEY=VALUE 형식으로 적어두면 자동 로딩됨(.env.example 참고)
 # ─────────────────────────────────────────────────────────────
 STOCK_CODE   = "302440"          # SK바이오사이언스
@@ -72,7 +72,6 @@ THRESHOLD    = 5.0               # ±5% — 변동 보고 트리거(하루 1회,
 MARKET_OPEN  = os.environ.get("MARKET_OPEN", "09:00")   # HH:MM (KST)
 MARKET_CLOSE = os.environ.get("MARKET_CLOSE", "15:30")  # HH:MM (KST)
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
-TOKEN_FILE   = os.path.expanduser("~/.stock_alert_302440_token.json")  # KIS 토큰 캐시(~24h 재사용)
 
 # 뉴스 수집 — 검색어 다양화(종목명 + 바이오 이슈), 시각 필터, 최종 건수
 NEWS_QUERIES = [
@@ -98,10 +97,9 @@ SECTOR_TOKENS   = ["제약", "바이오", "백신", "임상", "FDA", "신약", "
 ANALYSIS_NEWS_AGE_HOURS = 36    # 전일~당일 포괄
 ANALYSIS_NEWS_LIMIT     = 6     # 그룹별 분석에 넘길 헤드라인 수
 
-# 시장/업종/피어 — 보고서 2·3번 항목용 (모두 기존 KIS 키로 조회)
-KOSPI_CODE         = "0001"
-KOSDAQ_CODE        = "1001"
-PHARMA_SECTOR_CODE = "0009"   # KOSPI 의약품(제약) 업종 지수
+# 시장/업종/피어 — 보고서 2·3번 항목용 (네이버 지수 식별자/종목코드로 조회)
+KOSPI_CODE  = "KOSPI"
+KOSDAQ_CODE = "KOSDAQ"
 PEER_STOCKS = [               # 주요 제약·바이오 피어그룹 (이름, 종목코드)
     ("셀트리온",        "068270"),
     ("삼성바이오로직스", "207940"),
@@ -109,10 +107,6 @@ PEER_STOCKS = [               # 주요 제약·바이오 피어그룹 (이름, �
     ("GC녹십자",        "006280"),
     ("한미약품",        "128940"),
 ]
-
-KIS_APP_KEY    = os.environ.get("KIS_APP_KEY", "여기에_앱키")
-KIS_APP_SECRET = os.environ.get("KIS_APP_SECRET", "여기에_앱시크릿")
-KIS_BASE       = "https://openapi.koreainvestment.com:9443"  # 실전투자
 
 DART_API_KEY   = os.environ.get("DART_API_KEY", "여기에_DART키")
 DART_CORP_CODE = os.environ.get("DART_CORP_CODE", "여기에_8자리_고유번호")
@@ -173,152 +167,110 @@ def alert_admin(message):
 
 
 # ─────────────────────────────────────────────────────────────
-# 1) KIS — 주가 조회
+# 1) 네이버 금융 — 시세 조회 (무인증·무문자·실시간)
+#    polling.finance.naver.com 공개 JSON. KIS 접속 토큰 문자 문제를 없애기 위해 전환.
+#    비공식 API라 예고 없이 바뀔 수 있음(그 경우 감지 단계가 조용히 스킵 → 다음 폴링 재시도).
 # ─────────────────────────────────────────────────────────────
-def kis_token():
-    """KIS 접근토큰 발급. 토큰은 ~24h 유효하므로 파일에 캐시해 재사용한다.
+NAVER_STOCK_URL = "https://polling.finance.naver.com/api/realtime/domestic/stock"
+NAVER_INDEX_URL = "https://polling.finance.naver.com/api/realtime/domestic/index"
+NAVER_SECTOR_URL = "https://finance.naver.com/sise/sise_group_detail.naver?type=upjong&no=261"  # 제약 업종
+NAVER_HEADERS   = {"User-Agent": "Mozilla/5.0"}
 
-    KIS는 토큰을 '1분당 1회'만 발급하고 잦은 재발급은 403을 반환하므로,
-    5분 간격 폴링에서도 캐시된 유효 토큰(만료 10분 전까지)을 재사용한다.
-    """
+
+def _won(s):
+    """'37,550' / '-800' / '-' 같은 문자열 → int. 숫자 아님/빈값은 0."""
     try:
-        with open(TOKEN_FILE) as f:
-            c = json.load(f)
-        if c.get("token") and c.get("expires_at", 0) - 600 > time.time():
-            return c["token"]
-    except Exception:
-        pass  # 캐시 없음/손상 → 신규 발급
-
-    # 토큰 발급은 감지 파이프라인의 첫 호출이라 여기서 죽으면 실행 전체가 실패(CI 실패 메일).
-    # KIS의 일시적 네트워크 오류(타임아웃·RemoteDisconnected)를 흡수하도록 짧은 백오프 재시도.
-    data = None
-    for attempt in range(3):
-        try:
-            r = requests.post(
-                f"{KIS_BASE}/oauth2/tokenP",
-                json={"grant_type": "client_credentials",
-                      "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET},
-                timeout=10,
-            )
-            r.raise_for_status()
-            data = r.json()
-            break
-        except Exception:
-            if attempt < 2:
-                logging.warning("KIS 토큰 발급 실패 — 재시도(%d/2)", attempt + 1, exc_info=True)
-                time.sleep(1.5 * (attempt + 1))   # 1.5s → 3s 백오프
-                continue
-            raise                                  # 3회 모두 실패 시 전파(설계대로 비정상 종료)
-    token = data["access_token"]
-    try:
-        with open(TOKEN_FILE, "w") as f:
-            json.dump({"token": token, "expires_at": time.time() + int(data.get("expires_in", 86400))}, f)
-    except OSError:
-        logging.warning("토큰 캐시 저장 실패 — 계속 진행", exc_info=True)
-    return token
+        return int(str(s).replace(",", "").strip())
+    except (ValueError, AttributeError):
+        return 0
 
 
-def _kis_quote(token, path, tr_id, params, attempts=3):
-    """KIS 시세 GET 공통 — 'output'이 올 때까지 짧게 재시도(일시적 한도·블립 흡수). 실패 시 raise."""
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
-        "tr_id": tr_id,
-    }
-    last = None
-    for i in range(attempts):
-        try:
-            r = requests.get(f"{KIS_BASE}{path}", headers=headers, params=params, timeout=10)
-            r.raise_for_status()
-            j = r.json()
-            if isinstance(j.get("output"), dict) and j["output"]:
-                return j["output"]
-            last = j.get("msg1") or "output 없음"
-        except Exception as e:
-            last = e
-        if i < attempts - 1:
-            time.sleep(0.6)   # 초당 호출 한도/일시 오류 완화
-    raise RuntimeError(f"KIS 응답 이상({tr_id}): {last}")
+def get_price(code):
+    """네이버 폴링 API로 현재가·등락률 + 당일 고가/저가/전일종가 및 peak_rate 반환.
 
-
-def get_price(token, code):
-    """현재가·등락률 + 당일 고가/저가 및 그 전일대비 등락률 반환.
-
-    peak_rate = 당일 고가/저가 중 전일종가 대비 절대값이 큰 쪽(부호 유지).
-    장중 4% 찍고 되돌아온 경우도 트리거하기 위해 main()은 change_rate가 아닌 peak_rate로 판정.
+    전일종가 = 현재가 − 전일대비. peak_rate = 고가/저가 중 전일종가 대비 절대값이 큰 쪽(부호 유지).
+    장중 5% 찍고 되돌아온 경우도 트리거하기 위해 main()은 change_rate가 아닌 peak_rate로 판정.
+    응답 이상은 RuntimeError로 올려 감지 단계가 스킵하도록 한다.
     """
-    out = _kis_quote(token, "/uapi/domestic-stock/v1/quotations/inquire-price",
-                     "FHKST01010100", {"FID_COND_MRKT_DIV_CODE": "J", "FID_INPUT_ISCD": code})
-    price = int(out["stck_prpr"])                 # 현재가
-    prev  = int(out["stck_sdpr"])                 # 기준가(전일 종가)
-    high  = int(out["stck_hgpr"])                 # 당일 고가
-    low   = int(out["stck_lwpr"])                 # 당일 저가
-    rate  = lambda v: (v - prev) / prev * 100 if prev else 0.0
+    r = requests.get(f"{NAVER_STOCK_URL}/{code}", headers=NAVER_HEADERS, timeout=10)
+    r.raise_for_status()
+    try:
+        d = r.json()["datas"][0]
+        price = _won(d["closePrice"])                     # 장중엔 현재가
+        prev = price - _won(d["compareToPreviousClosePrice"])
+        high, low = _won(d["highPrice"]), _won(d["lowPrice"])
+        change_rate = float(d["fluctuationsRatio"])
+    except (KeyError, IndexError, ValueError, TypeError) as e:
+        raise RuntimeError(f"네이버 시세 응답 이상({code}): {e}")
+    rate = lambda v: (v - prev) / prev * 100 if prev else 0.0
     high_rate, low_rate = rate(high), rate(low)
     peak_rate = high_rate if abs(high_rate) >= abs(low_rate) else low_rate
     return {
         "price": price,
-        "change_rate": float(out["prdy_ctrt"]),   # 현재가 기준 등락률(%)
-        "volume": int(out["acml_vol"]),           # 누적 거래량
+        "change_rate": change_rate,                       # 현재가 기준 등락률(%)
+        "volume": _won(d.get("accumulatedTradingVolume")),
         "prev_close": prev,
         "high": high, "low": low,
-        "high_rate": high_rate, "low_rate": low_rate,  # 고가/저가의 전일대비 등락률(%)
-        "peak_rate": peak_rate,                   # 장중 최대 변동폭(절대값 큰 쪽, 부호 유지)
+        "high_rate": high_rate, "low_rate": low_rate,      # 고가/저가의 전일대비 등락률(%)
+        "peak_rate": peak_rate,                            # 장중 최대 변동폭(절대값 큰 쪽, 부호 유지)
     }
 
 
-def get_index(token, code):
-    """국내 지수 조회 → {'value': 지수값, 'rate': 등락률%} 또는 None(실패 시).
+def get_index(code):
+    """네이버 지수 조회 → {'value': 지수값, 'rate': 등락률%} 또는 None(실패 시).
 
-    code: 0001=KOSPI, 1001=KOSDAQ, 0009=KOSPI 의약품 업종.
+    code: 'KOSPI' / 'KOSDAQ'.
     """
     try:
-        out = _kis_quote(token, "/uapi/domestic-stock/v1/quotations/inquire-index-price",
-                         "FHPUP02100000", {"FID_COND_MRKT_DIV_CODE": "U", "FID_INPUT_ISCD": code})
-        return {"value": float(out["bstp_nmix_prpr"]),       # 지수 현재값
-                "rate": float(out["bstp_nmix_prdy_ctrt"])}   # 전일대비 등락률(%)
+        r = requests.get(f"{NAVER_INDEX_URL}/{code}", headers=NAVER_HEADERS, timeout=10)
+        r.raise_for_status()
+        d = r.json()["datas"][0]
+        return {"value": float(str(d["closePrice"]).replace(",", "")),
+                "rate": float(d["fluctuationsRatio"])}
     except Exception:
         logging.warning("지수 조회 실패(code=%s) — 해당 항목 생략", code, exc_info=True)
         return None
 
 
-def get_peers(token):
-    """피어그룹 등락률 [{'name', 'rate'}]. 개별 종목 실패는 건너뛴다(보조)."""
-    out = []
-    for name, code in PEER_STOCKS:
-        try:
-            out.append({"name": name, "rate": get_price(token, code)["change_rate"]})
-        except Exception:
-            logging.warning("피어 시세 실패(%s/%s) — 건너뜀", name, code, exc_info=True)
-    return out
+def get_peers():
+    """피어그룹 등락률 [{'name', 'rate'}] — 네이버 다종목 일괄 조회. 실패 시 빈 리스트.
 
-
-def get_investor_flow(token, code, price):
-    """장중 외국인/기관 '추정' 순매수를 억원으로 환산해 반환 {'foreign_eok','institution_eok'}.
-
-    KIS investor-trend-estimate(HHPTJ04160200)는 증권사 MTS와 동일한 '실시간 추정 가집계'로,
-    순매수 '수량(주)'만 제공한다 → 현재가를 곱해 금액(억원)으로 환산(추정치). 실패/미집계 시 None.
+    PEER_STOCKS 순서를 유지한다.
     """
-    headers = {
-        "authorization": f"Bearer {token}",
-        "appkey": KIS_APP_KEY, "appsecret": KIS_APP_SECRET,
-        "tr_id": "HHPTJ04160200",
-    }
+    codes = ",".join(c for _, c in PEER_STOCKS)
+    name_by_code = {c: n for n, c in PEER_STOCKS}
+    order = {c: i for i, (_, c) in enumerate(PEER_STOCKS)}
     try:
-        r = requests.get(f"{KIS_BASE}/uapi/domestic-stock/v1/quotations/investor-trend-estimate",
-                         headers=headers, params={"MKSC_SHRN_ISCD": code}, timeout=10)
+        r = requests.get(f"{NAVER_STOCK_URL}/{codes}", headers=NAVER_HEADERS, timeout=10)
         r.raise_for_status()
-        rows = r.json().get("output2") or []
-        if not rows:
-            return None
-        last = rows[-1]  # 최신 시간대 = 당일 누적 추정치
-        frgn_qty = int(last.get("frgn_fake_ntby_qty") or 0)
-        orgn_qty = int(last.get("orgn_fake_ntby_qty") or 0)
-        return {"foreign_eok": frgn_qty * price / 1e8,
-                "institution_eok": orgn_qty * price / 1e8}
+        rows = r.json()["datas"]
+        out = [{"name": name_by_code.get(d["itemCode"], d.get("stockName", "?")),
+                "rate": float(d["fluctuationsRatio"]),
+                "_i": order.get(d["itemCode"], 99)} for d in rows]
+        out.sort(key=lambda x: x.pop("_i"))
+        return out
     except Exception:
-        logging.warning("수급(외국인/기관) 조회 실패 — 수급 생략", exc_info=True)
-        return None
+        logging.warning("피어 시세 실패 — 생략", exc_info=True)
+        return []
+
+
+def get_pharma_sector():
+    """네이버 '제약' 업종(261) 지수 등락률 → {'rate': %} 또는 None(실패 시).
+
+    KIS의 KRX 의약품 지수(0009)와는 다른 지수(네이버/WICS '제약')다. sise_group_detail HTML에서
+    업종 지수 등락률을 추출한다 — 구성종목 셀은 style에 'padding-right'가 있고 업종 지수 등락률(헤더)엔
+    없음 → 그런 첫 %가 업종 지수. 비공식 페이지라 구조 변경 시 조회불가로 폴백.
+    """
+    try:
+        r = requests.get(NAVER_SECTOR_URL, headers=NAVER_HEADERS, timeout=10)
+        r.raise_for_status()
+        html_text = r.content.decode("euc-kr", "ignore")
+        for m in re.finditer(r"([+-]?\d+\.\d+)\s*%", html_text):
+            if "padding-right" not in html_text[max(0, m.start() - 40):m.start()]:
+                return {"rate": float(m.group(1))}
+    except Exception:
+        logging.warning("제약 업종 조회 실패 — 해당 항목 생략", exc_info=True)
+    return None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -660,7 +612,7 @@ def build_report(price_info, market, peers, narrative, direction, peer_news=None
         "<b>2. 국내 지수 및 업종 현황</b>",
         f" KOSPI: {_fmt_idx(market.get('kospi'))}",
         f" KOSDAQ: {_fmt_idx(market.get('kosdaq'))}",
-        f" 제약(의약품) 업종: {pharma_line}",
+        f" 제약 업종: {pharma_line}",
         "",
         "<b>3. 주요 제약사 동향</b>",
         *peer_lines,
@@ -760,77 +712,6 @@ def mark_alerted():
 
 
 # ─────────────────────────────────────────────────────────────
-# (임시) 네이버 시세 섀도우 검증 — KIS 교체 전, 동일 결과인지 5분마다 로그로 비교.
-#   운영 동작(트리거/발송)은 KIS 그대로. 여기서는 발송 없이 로그만 남긴다.
-#   같은 실행 안에서 돌아 KIS 토큰 추가 발급(=문자)이 없다. 검증 끝나면 제거 예정.
-# ─────────────────────────────────────────────────────────────
-def _naver_price(code):
-    """네이버 폴링 API로 KIS get_price와 같은 형태의 시세 dict 반환(검증용)."""
-    r = requests.get(f"https://polling.finance.naver.com/api/realtime/domestic/stock/{code}",
-                     timeout=10, headers={"User-Agent": "Mozilla/5.0"})
-    r.raise_for_status()
-    d = r.json()["datas"][0]
-    to_int = lambda s: int(str(s).replace(",", ""))
-    price = to_int(d["closePrice"])                       # 장중엔 현재가
-    prev = price - to_int(d["compareToPreviousClosePrice"])
-    high, low = to_int(d["highPrice"]), to_int(d["lowPrice"])
-    rate = lambda v: (v - prev) / prev * 100 if prev else 0.0
-    hr, lr = rate(high), rate(low)
-    return {"price": price, "prev_close": prev, "high": high, "low": low,
-            "change_rate": float(d["fluctuationsRatio"]),
-            "high_rate": hr, "low_rate": lr,
-            "peak_rate": hr if abs(hr) >= abs(lr) else lr}
-
-
-def _naver_pharma_sector():
-    """네이버 '제약' 업종(261) 지수 등락률(%) 반환. 실패 시 None. (HTML 파싱 — 취약)
-
-    구성종목 셀은 style에 'padding-right'를 갖는데 업종 지수 등락률(헤더)엔 없음 → 그 첫 %가 업종 지수.
-    """
-    r = requests.get("https://finance.naver.com/sise/sise_group_detail.naver?type=upjong&no=261",
-                     headers={"User-Agent": "Mozilla/5.0"}, timeout=10)
-    r.raise_for_status()
-    html = r.content.decode("euc-kr", "ignore")
-    for m in re.finditer(r"([+-]?\d+\.\d+)\s*%", html):
-        if "padding-right" not in html[max(0, m.start() - 40):m.start()]:
-            return float(m.group(1))
-    return None
-
-
-def shadow_compare_naver(token, kp):
-    """KIS(kp)와 네이버 시세를 비교해 로그로 남긴다(실패해도 운영 무영향).
-
-    ① 종목 시세(트리거 핵심): 고가/저가/전일종가 일치 여부.
-    ② 제약바이오 섹터: KIS 의약품(KRX 0009) vs 네이버 제약(WICS 261) — 다른 지수라
-       값 일치가 아니라 방향·추세가 같이 가는지 나란히 참고.
-    """
-    # ① 종목 시세 비교
-    try:
-        nv = _naver_price(STOCK_CODE)
-        same = all(kp.get(k) == nv.get(k) for k in ("prev_close", "high", "low"))
-        logging.info(
-            "[검증 시세] %s | 현재가 %s/%s · 전일 %s/%s · 고가 %s/%s · 저가 %s/%s · peak %+.2f%%/%+.2f%%",
-            "일치" if same else "불일치(확인필요)",
-            f"{kp['price']:,}", f"{nv['price']:,}",
-            f"{kp['prev_close']:,}", f"{nv['prev_close']:,}",
-            f"{kp['high']:,}", f"{nv['high']:,}",
-            f"{kp['low']:,}", f"{nv['low']:,}",
-            kp["peak_rate"], nv["peak_rate"])
-    except Exception:
-        logging.warning("[검증 시세] 네이버 조회 실패 — 스킵", exc_info=True)
-
-    # ② 제약바이오 섹터 비교 (다른 지수 — 방향 참고용)
-    try:
-        kis_ph = get_index(token, PHARMA_SECTOR_CODE)          # {value, rate} 또는 None
-        nv_ph = _naver_pharma_sector()                         # rate(%) 또는 None
-        kis_r = f"{kis_ph['rate']:+.2f}%" if kis_ph else "조회불가"
-        nv_r = f"{nv_ph:+.2f}%" if nv_ph is not None else "조회불가"
-        logging.info("[검증 섹터] KIS 의약품 %s vs 네이버 제약 %s (다른 지수 — 방향 참고)", kis_r, nv_r)
-    except Exception:
-        logging.warning("[검증 섹터] 비교 실패 — 스킵", exc_info=True)
-
-
-# ─────────────────────────────────────────────────────────────
 def main():
     setup_logging()
 
@@ -840,23 +721,21 @@ def main():
         logging.info("장 운영 시간(평일 %s~%s KST) 외 — 스킵", MARKET_OPEN, MARKET_CLOSE)
         return
 
-    # 오늘 이미 보고했으면 KIS 호출 전에 즉시 종료 — 발송 후 남은 폴링의 불필요한 KIS 호출 방지.
+    # 오늘 이미 보고했으면 시세 조회 전에 즉시 종료 — 발송 후 남은 폴링의 불필요한 호출 방지.
     if already_alerted_today():
-        logging.info("오늘 이미 보고함 — 스킵(KIS 호출 생략)")
+        logging.info("오늘 이미 보고함 — 스킵(시세 호출 생략)")
         return
 
-    # 감지 단계 — 매 실행(5분 간격) 도는 부분. KIS 일시 장애(타임아웃·연결끊김·이상응답)는
-    # 재시도로도 안 되면 '이번 폴링만 조용히 스킵(정상 종료)'한다. 5분 뒤 다음 폴링이 자동 복구하므로
+    # 감지 단계 — 매 실행(5분 간격) 도는 부분. 네이버 일시 장애(타임아웃·연결끊김·응답이상)는
+    # '이번 폴링만 조용히 스킵(정상 종료)'한다. 5분 뒤 다음 폴링이 자동 복구하므로
     # CI 실패(=All jobs have failed 메일)로 도배하지 않기 위함. 진짜 장기 장애면 보고 부재로 드러난다.
     try:
-        token = kis_token()
-        p = get_price(token, STOCK_CODE)
+        p = get_price(STOCK_CODE)
     except (requests.exceptions.RequestException, RuntimeError) as e:
         logging.warning("감지 단계 일시 실패 — 이번 폴링 스킵(다음 5분 폴링이 재시도): %s", e)
         return
     logging.info("%s %s원 (현재 %+.2f%% / 장중 고가 %+.2f%% · 저가 %+.2f%%)",
                  STOCK_NAME, f"{p['price']:,}", p["change_rate"], p["high_rate"], p["low_rate"])
-    shadow_compare_naver(token, p)   # (임시) KIS vs 네이버 검증(시세+섹터) — 발송 영향 없음
 
     # 트리거는 현재가가 아니라 '장중 최대 변동폭'(고가/저가 중 큰 쪽)으로 판정 —
     # 장중 5% 찍고 되돌아온 경우도 놓치지 않기 위함. 하루 1회만 발송.
@@ -867,11 +746,11 @@ def main():
     # 여기서부터는 트리거됨 — 실패하면 보고 누락이므로 관리자에게 통지.
     try:
         market = {                            # 지수/업종 (개별 실패는 None, 보조)
-            "kospi":  get_index(token, KOSPI_CODE),
-            "kosdaq": get_index(token, KOSDAQ_CODE),
-            "pharma": get_index(token, PHARMA_SECTOR_CODE),
+            "kospi":  get_index(KOSPI_CODE),
+            "kosdaq": get_index(KOSDAQ_CODE),
+            "pharma": get_pharma_sector(),
         }
-        peers = get_peers(token)              # 피어그룹 등락률(보조)
+        peers = get_peers()                   # 피어그룹 등락률(보조)
         disclosures = get_disclosures()       # 실패해도 [] 반환(보조)
         news = get_related_news()             # 관련 뉴스(당사 우선 + 섹터 보충, 노이즈 제외) — 별도 메시지로 발송
         # '1. 상승/하락 원인' 분석용 — 4개 차원 뉴스 그룹(전일~당일)
