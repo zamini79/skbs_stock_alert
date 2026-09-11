@@ -49,9 +49,9 @@ python3 stock_alert_302440.py
 ```
 
 ## 5. 장중 자동 실행 (선택)
-평일 09~15시 5분 간격, crontab(`crontab -e`):
+평일 09~20시 5분 간격, crontab(`crontab -e`):
 ```
-*/5 9-15 * * 1-5 /usr/bin/python3 /절대경로/stock_alert_302440.py >> ~/stock_alert.log 2>&1
+*/5 9-20 * * 1-5 /usr/bin/python3 /절대경로/stock_alert_302440.py >> ~/stock_alert.log 2>&1
 ```
 맥은 절전 시 cron이 멈추므로, 24시간 운영이 필요하면 클라우드로 옮기는 것을 권장.
 

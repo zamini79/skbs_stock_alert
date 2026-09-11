@@ -70,7 +70,7 @@ STOCK_NAME   = "SK바이오사이언스"
 THRESHOLD    = 5.0               # ±5% — 변동 보고 트리거(하루 1회, 풀 보고서)
 # 장 운영 시간 가드(KST 평일). cron이 지연 실행돼도 장시간 외엔 보고하지 않도록 스크립트가 직접 차단.
 MARKET_OPEN  = os.environ.get("MARKET_OPEN", "09:00")   # HH:MM (KST)
-MARKET_CLOSE = os.environ.get("MARKET_CLOSE", "15:30")  # HH:MM (KST)
+MARKET_CLOSE = os.environ.get("MARKET_CLOSE", "20:00")  # HH:MM (KST) — 2026-09-14부터 KRX 정규장 20:00 마감
 STATE_FILE   = os.path.expanduser("~/.stock_alert_302440_state.json")
 
 # 뉴스 수집 — 검색어 다양화(종목명 + 바이오 이슈), 시각 필터, 최종 건수
@@ -715,7 +715,7 @@ def mark_alerted():
 def main():
     setup_logging()
 
-    # 장 운영 시간 가드 — cron이 지연 실행돼도 평일 09:00~15:30(KST) 밖이면 아무것도 하지 않음.
+    # 장 운영 시간 가드 — cron이 지연 실행돼도 평일 09:00~20:00(KST) 밖이면 아무것도 하지 않음.
     # (IGNORE_MARKET_HOURS=1 로 수동 점검 시 우회 가능)
     if os.environ.get("IGNORE_MARKET_HOURS") != "1" and not within_market_hours():
         logging.info("장 운영 시간(평일 %s~%s KST) 외 — 스킵", MARKET_OPEN, MARKET_CLOSE)
