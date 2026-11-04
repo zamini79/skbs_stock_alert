@@ -93,9 +93,11 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
 - 4단계 전체 흐름이 한 파일에 구현됨. 환경변수/`.env` 기반 설정, 중복 알림 방지(쿨다운) 적용.
 - **TODO #1 완료** — `tools/find_corp_code.py`로 `corp_code`(01319899) 확보.
 - **TODO #3 완료** — 보조 수집 안전 폴백, AI 실패 폴백, 파일 로깅, 관리자 알림.
-- **TODO #4 완료** — GitHub Actions 스케줄링(`.github/workflows/stock-alert.yml`): 평일 KST 09:00~20:00 (2026-09-14 KRX 거래시간 연장 반영)
-  5분 간격 + 수동 실행. 키는 GitHub Secrets.
-  - **장 운영 시간 가드(코드 차원)**: GitHub cron은 부하 시 **수 시간 지연 실행**될 수 있어(실측: KST 18·19시 오발송),
+- **TODO #4 완료** — GitHub Actions 실행(`.github/workflows/stock-alert.yml`): 트리거는 `workflow_dispatch`뿐이며,
+  외부 **cron-job.org가 5분마다 API로 dispatch**한다(시간 제한 없음). 키는 GitHub Secrets.
+  - **`schedule:` 트리거는 의도적으로 제거**(2026-11-04): 공개 저장소는 60일간 push가 없으면 schedule 워크플로를
+    비활성화하며 그러면 dispatch도 막힌다. GitHub cron은 실측상 하루 ~3회만 지연 실행돼 백업 가치도 없었다. 다시 넣지 말 것.
+  - **장 운영 시간 가드(코드 차원)**: 트리거가 수 시간 지연 실행될 수 있어(실측: KST 18·19시 오발송),
     `main()`이 시작 직후 `within_market_hours()`로 평일 `MARKET_OPEN`~`MARKET_CLOSE`(기본 09:00~20:00 KST) 밖이면
     시세 호출 전에 스킵한다. 수동 점검은 `IGNORE_MARKET_HOURS=1`로 우회. (cron 창만 믿지 않는 방어 계층)
   - **쿨다운 상태 캐시**: `actions/cache` 키는 immutable이라 **고정 키로는 같은 날 갱신이 안 돼 중복 발송**된다(실측).
@@ -108,8 +110,8 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
    사장님 방 직행 전 IR 담당자 검수 단계(담당자 방 선발송 → 승인 시 전달)를 넣는 옵션을 고려.
 2. (선택) **n8n 포팅**(구 #6): 노코드 유지보수가 필요하면 동일 흐름을 n8n 워크플로로 옮긴다.
 
-운영 메모: `TELEGRAM_CHAT_ID`가 개인방이면 그룹방(`-100…`)으로 교체 권장. GitHub 무료 스케줄은
-부하 시 5~15분 지연/누락 가능(±5% 일일 감지엔 무방).
+운영 메모: `TELEGRAM_CHAT_ID`가 개인방이면 그룹방(`-100…`)으로 교체 권장. 실행은 cron-job.org
+단일 트리거이므로, 그쪽 작업 정지·GitHub 토큰 만료 시 실행이 끊긴다(cron-job.org 실패 알림 메일 권장).
 
 ## 주의사항
 - 상장사 IR 자료다. **AI 분석은 추정**임을 보고서에 항상 명시(코드의 프롬프트에 반영돼 있음).

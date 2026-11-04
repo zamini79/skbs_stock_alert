@@ -1,14 +1,12 @@
 name: 주가 변동 감지 (SK바이오사이언스 302440)
 
-# 평일 장중(KST 09:00~20:00) 5분 간격 실행 + 수동 실행 지원.
-# (2026-09-14부터 KRX 정규장 09:00~20:00으로 연장 — 이전 09:00~15:30)
-# GitHub Actions cron 은 UTC 기준이므로 KST(=UTC+9)에서 9시간을 뺀 0~6시(UTC)로 지정.
-# ⚠️ GitHub 무료 cron 은 짧은 주기를 보장하지 못함(부하 시 5분+ 간격/누락). 정확한 주기가 필요하면 클라우드 cron 필요.
+# 실행 트리거는 workflow_dispatch 하나뿐이다.
+# - 외부 cron-job.org 가 5분마다 API로 dispatch 한다(시간 제한 없음). 장 시간 판정은 코드 가드가 전담.
+# - GitHub schedule 트리거는 두지 않는다: 공개 저장소는 60일간 push 가 없으면 schedule 워크플로를
+#   통째로 비활성화하고(이 경우 dispatch 도 막힘), 실측상 하루 3회 남짓만 지연 실행돼 백업 가치도 없었다.
+# - Actions 탭에서 수동 실행도 가능(테스트용).
 on:
-  schedule:
-    - cron: "*/5 0-10 * * 1-5"  # UTC 00:00~10:55 = KST 09:00~19:55, 5분 간격, 월~금
-    - cron: "0 11 * * 1-5"      # UTC 11:00       = KST 20:00 마감 시각 1회, 월~금
-  workflow_dispatch:             # Actions 탭에서 수동 실행(테스트용)
+  workflow_dispatch:
 
 # concurrency 그룹은 두지 않는다: GitHub 러너 백로그(러너 배정 지연) 시 5분마다 오는 트리거가
 # pending 큐에 쌓이면서 서로를 취소해 'All jobs were cancelled' 메일이 무더기로 발송됐다(실측: 야간 45건).
