@@ -26,7 +26,7 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
    - `abs(peak_rate) >= THRESHOLD(5.0)` 이고 당일 미발송 → `analyze()` 풀 원인분석 보고서 발송.
    - **당일 이미 보고했으면 시세 호출 전에 즉시 스킵** — 발송 후 남은 5분 폴링의 불필요한 호출 방지(시세 로그는 발송 후 미기록).
    - 보고서 발송 직후 `build_news_message()`로 '관련 뉴스'를 **별도 메시지**로 추가 발송(best-effort).
-   - `build_report`의 '4. 향후 대응'은 고정 문구(`OUTLOOK_FIXED`). 급등/급락(±7%↑) 피어엔 기사 링크 표시.
+   - `build_report`의 '4. 기타'는 고정 문구(`OUTLOOK_FIXED`). 급등/급락(±7%↑) 피어엔 기사 링크 표시.
 3. **원인 수집**
    - `get_disclosures()` : OpenDART 당일 공시 목록
    - `get_news()` : 네이버 뉴스(다중 검색어·중복제거·시각필터·최신순)

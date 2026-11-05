@@ -578,7 +578,7 @@ def build_report(price_info, market, peers, narrative, direction, peer_news=None
     """사장님 보고용 텔레그램 HTML 리포트 조립. 수치는 코드가, 서술은 narrative(LLM)가 채운다.
 
     '관련 뉴스'는 본 보고서에 넣지 않고 main()이 별도 메시지로 발송한다.
-    '4. 향후 대응'은 고정 문구(OUTLOOK_FIXED)를 사용한다.
+    '4. 기타'는 고정 문구(OUTLOOK_FIXED)를 사용한다.
     """
     price, rate = price_info["price"], price_info["change_rate"]
     peak = price_info.get("peak_rate", rate)
@@ -617,7 +617,7 @@ def build_report(price_info, market, peers, narrative, direction, peer_news=None
         "<b>3. 주요 제약사 동향</b>",
         *peer_lines,
         "",
-        "<b>4. 향후 대응</b>",
+        "<b>4. 기타</b>",
         f" {OUTLOOK_FIXED}",
         "",
         "감사합니다.",
