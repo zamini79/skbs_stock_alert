@@ -87,6 +87,11 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
   - `GEMINI_API_KEY` — Google Gemini (https://aistudio.google.com, **무료·카드 불필요**). 현재 운영 키.
   - `GEMINI_MODEL` — (선택) 기본 `gemini-2.5-flash-lite`. ⚠️ 구형 `gemini-2.0-*`은 무료 쿼터가
     `limit:0`이라 동작 안 함. 무료 티어는 `*-flash-lite` 계열에서 호출됨(풀 flash는 503 잦음).
+  - `GEMINI_FALLBACK_MODELS` — (선택) 주 모델 실패 시 순서대로 시도할 대체 모델(쉼표 구분).
+    기본 `gemini-3.5-flash-lite,gemini-3.1-flash-lite`(2026-11-06 같은 키로 200 확인). `gemini-2.5-flash`는 신규 사용자 404.
+  - **LLM 장애 대비**: `_post_llm()`이 429·5xx·연결 실패를 재시도(Claude 3/8/15초, Gemini 모델당 3/8초)하고,
+    Gemini는 주 모델 → 대체 모델 순으로 넘어간다. 전부 실패해야 '(AI 요약 미수행)' 기본 보고서로 폴백.
+    계기: 2026-11-05 09:05 보고가 Gemini 503 1회로 AI 요약 누락.
 - `LOG_FILE` — (선택) 로그 파일 경로. 기본 `~/.stock_alert_302440.log`.
 
 ## 현재 상태 (완료)

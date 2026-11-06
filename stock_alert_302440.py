@@ -127,8 +127,13 @@ CLAUDE_MODEL   = "claude-sonnet-4-6"  # 최신 모델명은 docs.claude.com 에�
 # Google Gemini — 무료 키: https://aistudio.google.com (Anthropic 대체용, 크레딧 불필요)
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 # 무료 티어에서 호출되는 모델로 지정. 구형(gemini-2.0-*)은 무료 쿼터가 0(limit:0)이라 동작 안 함.
-# 호출 실패(쿼터/과부하) 시 analyze()가 기본 보고서로 폴백. 모델 교체는 GEMINI_MODEL 환경변수로.
-GEMINI_MODEL   = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
+# 모델 교체는 GEMINI_MODEL 환경변수로.
+GEMINI_MODEL   = os.environ.get("GEMINI_MODEL") or "gemini-2.5-flash-lite"
+# 주 모델 실패(재시도 후에도 503 등) 시 순서대로 시도할 대체 모델(쉼표 구분). 모델마다 서버·무료 쿼터가 별개라
+# 한 모델 과부하에도 다른 모델은 응답하는 경우가 많다. 모두 실패하면 analyze()가 기본 보고서로 폴백.
+# 2026-11-06 같은 키로 200 확인. ⚠️ gemini-2.5-flash(비 lite)는 신규 사용자 404라 넣지 말 것.
+GEMINI_FALLBACK_MODELS = [m.strip() for m in (os.environ.get("GEMINI_FALLBACK_MODELS")
+                          or "gemini-3.5-flash-lite,gemini-3.1-flash-lite").split(",") if m.strip()]
 
 LOG_FILE = os.environ.get("LOG_FILE", os.path.expanduser("~/.stock_alert_302440.log"))
 
@@ -511,11 +516,13 @@ def _narrative_prompt(price_info, market, peers, disclosures, news, direction, n
 # 응답이 빨리 오는 오류·연결 실패만 재시도하고, 타임아웃(60초)은 재시도하지 않는다(워크플로 5분 제한).
 LLM_RETRY_STATUS = {429, 500, 502, 503, 504}
 LLM_RETRY_DELAYS = (3, 8, 15)  # 재시도 전 대기(초) — 최대 4회 호출
+# Gemini 는 대체 모델로 넘어가는 편이 빨라서 모델당 재시도를 줄인다(최악 시에도 워크플로 5분 안에 끝나도록).
+GEMINI_RETRY_DELAYS = (3, 8)
 
 
-def _post_llm(url, **kwargs):
+def _post_llm(url, delays=LLM_RETRY_DELAYS, **kwargs):
     """requests.post + 일시 장애 재시도. 최종 실패 시 예외를 그대로 올린다."""
-    for attempt, delay in enumerate((*LLM_RETRY_DELAYS, None), 1):
+    for attempt, delay in enumerate((*delays, None), 1):
         try:
             r = requests.post(url, **kwargs)
             if r.status_code not in LLM_RETRY_STATUS or delay is None:
@@ -527,7 +534,7 @@ def _post_llm(url, **kwargs):
                 raise
             reason = type(e).__name__
         logging.warning("LLM 호출 일시 실패(%s) — %d초 후 재시도 (%d/%d)",
-                        reason, delay, attempt, len(LLM_RETRY_DELAYS))
+                        reason, delay, attempt, len(delays))
         time.sleep(delay)
 
 
@@ -543,15 +550,31 @@ def _call_claude(prompt):
     return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
 
 
-def _call_gemini(prompt):
+def _call_gemini_model(model, prompt):
     r = _post_llm(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        delays=GEMINI_RETRY_DELAYS,
         headers={"content-type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=60,
     )
     parts = r.json()["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts)
+
+
+def _call_gemini(prompt):
+    """주 모델 → 대체 모델 순서로 시도. 전부 실패하면 마지막 예외를 올린다."""
+    models = [GEMINI_MODEL] + [m for m in GEMINI_FALLBACK_MODELS if m != GEMINI_MODEL]
+    for i, model in enumerate(models):
+        try:
+            text = _call_gemini_model(model, prompt)
+            if i:
+                logging.info("Gemini 대체 모델(%s)로 분석 성공", model)
+            return text
+        except Exception as e:
+            if i == len(models) - 1:
+                raise
+            logging.warning("Gemini 모델 %s 실패(%s) — 대체 모델 %s 시도", model, e, models[i + 1])
 
 
 def _llm_narrative(price_info, market, peers, disclosures, news, direction, news_ctx):
