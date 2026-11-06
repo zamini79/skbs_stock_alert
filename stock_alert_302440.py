@@ -507,8 +507,32 @@ def _narrative_prompt(price_info, market, peers, disclosures, news, direction, n
   "cause_sector": "제약·바이오 섹터 동향 및 원인 — 특정 이슈가 섹터 투자심리 호조/악화에 미친 원인"}}"""
 
 
+# LLM 일시 장애(과부하 503·쿼터 429 등) 재시도. 실측: Gemini 무료 티어 503 한 번에 그날 AI 요약이 통째로 빠짐.
+# 응답이 빨리 오는 오류·연결 실패만 재시도하고, 타임아웃(60초)은 재시도하지 않는다(워크플로 5분 제한).
+LLM_RETRY_STATUS = {429, 500, 502, 503, 504}
+LLM_RETRY_DELAYS = (3, 8, 15)  # 재시도 전 대기(초) — 최대 4회 호출
+
+
+def _post_llm(url, **kwargs):
+    """requests.post + 일시 장애 재시도. 최종 실패 시 예외를 그대로 올린다."""
+    for attempt, delay in enumerate((*LLM_RETRY_DELAYS, None), 1):
+        try:
+            r = requests.post(url, **kwargs)
+            if r.status_code not in LLM_RETRY_STATUS or delay is None:
+                r.raise_for_status()
+                return r
+            reason = f"HTTP {r.status_code}"
+        except requests.ConnectionError as e:
+            if delay is None:
+                raise
+            reason = type(e).__name__
+        logging.warning("LLM 호출 일시 실패(%s) — %d초 후 재시도 (%d/%d)",
+                        reason, delay, attempt, len(LLM_RETRY_DELAYS))
+        time.sleep(delay)
+
+
 def _call_claude(prompt):
-    r = requests.post(
+    r = _post_llm(
         "https://api.anthropic.com/v1/messages",
         headers={"x-api-key": ANTHROPIC_KEY, "anthropic-version": "2023-06-01",
                  "content-type": "application/json"},
@@ -516,18 +540,16 @@ def _call_claude(prompt):
               "messages": [{"role": "user", "content": prompt}]},
         timeout=60,
     )
-    r.raise_for_status()
     return "".join(b["text"] for b in r.json()["content"] if b["type"] == "text")
 
 
 def _call_gemini(prompt):
-    r = requests.post(
+    r = _post_llm(
         f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent",
         headers={"content-type": "application/json", "x-goog-api-key": GEMINI_API_KEY},
         json={"contents": [{"parts": [{"text": prompt}]}]},
         timeout=60,
     )
-    r.raise_for_status()
     parts = r.json()["candidates"][0]["content"]["parts"]
     return "".join(p.get("text", "") for p in parts)
 
