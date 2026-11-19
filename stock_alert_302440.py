@@ -68,6 +68,7 @@ load_dotenv()
 STOCK_CODE   = "302440"          # SK바이오사이언스
 STOCK_NAME   = "SK바이오사이언스"
 THRESHOLD    = 5.0               # ±5% — 변동 보고 트리거(하루 1회, 풀 보고서)
+PRICE_LIMIT_PCT = 30.0           # KRX 일일 가격제한폭(±30%) — 이를 넘는 등락률은 데이터 이상으로 간주
 # 장 운영 시간 가드(KST 평일). cron이 지연 실행돼도 장시간 외엔 보고하지 않도록 스크립트가 직접 차단.
 MARKET_OPEN  = os.environ.get("MARKET_OPEN", "09:00")   # HH:MM (KST)
 MARKET_CLOSE = os.environ.get("MARKET_CLOSE", "20:00")  # HH:MM (KST) — 2026-09-14부터 KRX 정규장 20:00 마감
@@ -207,9 +208,16 @@ def get_price(code):
         change_rate = float(d["fluctuationsRatio"])
     except (KeyError, IndexError, ValueError, TypeError) as e:
         raise RuntimeError(f"네이버 시세 응답 이상({code}): {e}")
-    rate = lambda v: (v - prev) / prev * 100 if prev else 0.0
+    # 개장 전(당일 체결 없음)엔 고가/저가가 0으로 와서 peak_rate가 -100%로 계산된다.
+    # 실측: 2026-11-19 수능일 개장 10시 연기 → 09:00 폴링에서 '-100% 급락' 오보고 발송.
+    if price <= 0 or prev <= 0 or high <= 0 or low <= 0:
+        raise RuntimeError(f"당일 체결 없음(개장 전 추정, {code}) — 고가 {high} · 저가 {low} · 현재가 {price}")
+    rate = lambda v: (v - prev) / prev * 100
     high_rate, low_rate = rate(high), rate(low)
     peak_rate = high_rate if abs(high_rate) >= abs(low_rate) else low_rate
+    # KRX 가격제한폭(±30%)을 넘는 값은 실제로 나올 수 없으므로 데이터 이상으로 보고 스킵
+    if abs(peak_rate) > PRICE_LIMIT_PCT:
+        raise RuntimeError(f"등락률 비정상({code}, peak {peak_rate:+.2f}%) — 가격제한폭 초과, 데이터 이상 추정")
     return {
         "price": price,
         "change_rate": change_rate,                       # 현재가 기준 등락률(%)

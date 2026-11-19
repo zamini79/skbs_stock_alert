@@ -40,6 +40,8 @@ python3 stock_alert_302440.py          # 1회 실행 (현재가 확인 → 조�
 - **네이버 금융 공개 API 매핑** (비공식·무인증 — 예고 없이 바뀔 수 있어 깨지기 쉬움. `NAVER_*_URL` 상수):
   - `get_price(code)` → `polling.finance.naver.com/api/realtime/domestic/stock/{code}` → `datas[0]`.
     필드: `closePrice`(장중=현재가)·`compareToPreviousClosePrice`(전일대비)·`fluctuationsRatio`(등락률%)·`highPrice`(고가)·`lowPrice`(저가)·`accumulatedTradingVolume`(거래량). **전일종가 = 현재가 − 전일대비**로 계산, `peak_rate`도 계산.
+    **개장 전(체결 없음)엔 고가/저가가 0** → `peak_rate` −100%로 계산되므로 `RuntimeError`로 스킵한다(2026-11-19 수능일 개장 10시 연기 때 09:00 '−100% 급락' 오보고 발생).
+    `|peak_rate|`가 가격제한폭(`PRICE_LIMIT_PCT`=30%)을 넘어도 데이터 이상으로 스킵. 개장 시각과 무관하게 동작.
   - `get_index(code)` → `.../index/{code}` (`KOSPI`/`KOSDAQ`). 필드: `closePrice`(지수값)·`fluctuationsRatio`(등락률).
     참고: **2026년 KOSPI는 ~7,000대** 강세장. 값이 커 보여도 정상.
   - `get_peers()` → `.../stock/{code1,code2,...}` 다종목 일괄. `PEER_STOCKS` 순서 유지.
